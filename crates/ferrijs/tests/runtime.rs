@@ -734,3 +734,45 @@ async fn process_exit_does_not_kill_the_host() {
       .is_some_and(|m| m.contains("process.exit(3) is not available"))
   );
 }
+
+/// A configured sink keeps receiving across runs. The realm reuses its
+/// own capture rather than installing a fresh console per run, so this
+/// is the test that says the reuse did not cost a message.
+#[tokio::test]
+async fn a_console_sink_receives_every_run() {
+  #[derive(Debug, Default)]
+  struct Collect(std::sync::Mutex<Vec<String>>);
+
+  impl ferrijs::ConsoleSink for Collect {
+    fn emit(&self, entry: &ferrijs::ConsoleEntry) {
+      self
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(entry.message.clone());
+    }
+  }
+
+  let sink = Arc::new(Collect::default());
+  let rt = Runtime::builder()
+    .console(ferrijs::ConsoleOptions {
+      sink: Some(Arc::clone(&sink) as Arc<dyn ferrijs::ConsoleSink>),
+      ..ferrijs::ConsoleOptions::default()
+    })
+    .build()
+    .await
+    .expect("runtime");
+
+  for n in 0..3 {
+    let run = rt
+      .eval_script(&format!("console.log('run {n}'); return 1"), &[], RunOptions::default())
+      .await;
+    ok(&run);
+    // Streaming means the buffered form stays empty, which is what
+    // `ConsoleOptions::sink` promises.
+    assert!(run.console.is_empty(), "a streamed run buffers nothing");
+  }
+
+  let seen = sink.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+  assert_eq!(seen, vec!["run 0", "run 1", "run 2"]);
+}

@@ -49,6 +49,12 @@ pub struct ConsoleOptions {
   /// When set, `console.*` calls stream to this sink as they happen and
   /// [`Run::console`] stays empty. `None` (the default) keeps the
   /// buffered form every machine consumer reads.
+  ///
+  /// A streaming realm installs its console once and keeps it, so
+  /// `ConsoleEntry::ts_ms` counts from when the realm was built rather
+  /// than from the start of the run the entry belongs to: one clock for
+  /// the realm's whole life, which is what a session's event stream
+  /// wants anyway.
   pub sink: Option<Arc<dyn ConsoleSink>>,
 }
 
@@ -383,6 +389,12 @@ pub struct Runtime {
   applied: AppliedLimits,
   timeout: Arc<TimeoutState>,
   poisoned: AtomicBool,
+  /// The capture installed when the realm was built. Kept because a
+  /// streaming console needs no per-run one: with a sink, `push`
+  /// forwards and retains nothing, so a fresh capture per run would
+  /// re-install nineteen closures to arrive at the same behaviour. See
+  /// [`Self::run`].
+  base_console: Arc<ConsoleCapture>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -471,6 +483,7 @@ impl Runtime {
 
     let base_console = Arc::new(Self::console_capture(&config));
     let install_console_capture = Arc::clone(&base_console);
+    let kept_console = Arc::clone(&base_console);
     let install_registry = Arc::clone(&registry);
     let ud_vm = vm.clone();
     let permissions = Arc::clone(&config.permissions);
@@ -544,6 +557,7 @@ impl Runtime {
       applied,
       timeout,
       poisoned: AtomicBool::new(false),
+      base_console: kept_console,
     })
   }
 
@@ -649,7 +663,16 @@ impl Runtime {
   /// value and failure are redacted before they are handed back.
   pub async fn run<T: Send + 'static>(&self, options: RunOptions, body: RunBody<T>) -> Run<T> {
     let started = Instant::now();
-    let console = Arc::new(Self::console_capture(&self.config));
+    // A streaming console retains nothing and `drain` always answers
+    // empty, so a per-run capture would only be a second object with the
+    // same sink behind it -- and installing it costs nineteen closures
+    // on every call. The realm's own capture already forwards there.
+    let streaming = self.config.console.sink.is_some();
+    let console = if streaming {
+      Arc::clone(&self.base_console)
+    } else {
+      Arc::new(Self::console_capture(&self.config))
+    };
     if self.poisoned() {
       return Run {
         result: Err(ScriptError::internal(
@@ -665,7 +688,9 @@ impl Runtime {
     let run_console = Arc::clone(&console);
 
     let fut = vm_with!(self.vm => |ctx| {
-      if let Err(e) = install_console(&ctx, run_console) {
+      if !streaming
+        && let Err(e) = install_console(&ctx, run_console)
+      {
         return Err(ScriptError::internal(format!("failed to install console: {e}")));
       }
       body(ctx).await
