@@ -171,13 +171,16 @@ jobs:
       - run: cargo check --workspace --all-features
 
   # ---------------------------------------------------------------------------
-  # Catch publish rot before release day. Only `ferrijs-permissions` can be
-  # verified: verification builds the packaged crate against crates.io, and
-  # every other crate here depends on a sibling whose published version lags
-  # the workspace. The rest still get their manifest and file list checked.
+  # Catch publish rot before release day: a file the manifest excludes, a
+  # path dependency with no `version`, a README that is not in the package.
+  #
+  # `--workspace` rather than a per-crate `cargo publish --dry-run`, because
+  # a dry run resolves each sibling from crates.io even with `--no-verify`,
+  # and until the first release none of these are there. Packaging the
+  # workspace resolves them against each other instead.
   # ---------------------------------------------------------------------------
   packaging:
-    name: Publish dry-run
+    name: Package
     needs: [basics]
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -189,13 +192,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo publish --dry-run -p ferrijs-permissions
-      - name: Package every other crate
-        run: |
-          for pkg in ferrijs-fetch ferrijs-std ferrijs ferrijs-bundle ferrijs-cli; do
-            echo "--- $pkg"
-            cargo publish --dry-run --no-verify -p "$pkg"
-          done
+      - run: cargo package --workspace --no-verify
 
   security:
     name: Security audit
