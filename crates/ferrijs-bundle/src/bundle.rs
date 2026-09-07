@@ -224,8 +224,9 @@ impl Plugin for RuntimePlugin {
 
   // rolldown's `Plugin` declares these `async`; an impl that happens to
   // need no `.await` still cannot drop the keyword without failing to
-  // satisfy the trait, which is what `unused_async` is asking for.
-  #[allow(clippy::unused_async)]
+  // satisfy the trait. `unknown_lints` rides along because the lint
+  // itself only exists from 1.98, and this crate still compiles below it.
+  #[allow(unknown_lints, clippy::unused_async_trait_impl)]
   async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
     if args.specifier == MULTI_ENTRY_ID && self.multi_entry.is_some() {
       return Ok(Some(HookResolveIdOutput::from_id(MULTI_ENTRY_ID)));
@@ -261,8 +262,9 @@ impl Plugin for RuntimePlugin {
 
   // rolldown's `Plugin` declares these `async`; an impl that happens to
   // need no `.await` still cannot drop the keyword without failing to
-  // satisfy the trait, which is what `unused_async` is asking for.
-  #[allow(clippy::unused_async)]
+  // satisfy the trait. `unknown_lints` rides along because the lint
+  // itself only exists from 1.98, and this crate still compiles below it.
+  #[allow(unknown_lints, clippy::unused_async_trait_impl)]
   async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
     if args.id == MULTI_ENTRY_ID
       && let Some(src) = &self.multi_entry
