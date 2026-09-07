@@ -1449,7 +1449,7 @@ fn do_fetch<'js>(
     // every script `fetch` regardless of grant (closes the default-open
     // SSRF); loopback stays reachable so local servers work.
     let net_guard = ferrijs_std::permissions::container(&ctx).map(|container| NetGuard {
-      policy: Some(backend.net_policy(container)),
+      policy: Some(backend.net_policy(&ctx, container)),
       block_metadata: true,
       block_private: false,
     });

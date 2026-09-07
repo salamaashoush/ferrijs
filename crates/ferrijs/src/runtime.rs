@@ -31,7 +31,7 @@ use crate::modules::{
 use crate::realm::RealmOptions;
 use crate::redact::Redactor;
 use crate::result::ConsoleEntry;
-use crate::source_map::CompiledModule;
+use crate::source_map::{CompiledModule, SourceMapper};
 use crate::vm::{VmHandle, VmShutdown, spawn_vm_loop};
 use crate::vm_with;
 
@@ -742,36 +742,16 @@ impl Runtime {
   /// level and `return <value>` surfaces as the result. `args` is never
   /// interpolated into the source. For an ES module (`import` /
   /// `export`, TypeScript) bundle it and use [`Self::eval_module`].
-  pub async fn eval_script(
-    &self,
-    source: &str,
-    args: &[serde_json::Value],
-    options: RunOptions,
-  ) -> Run<serde_json::Value> {
-    let source_owned = source.to_string();
+  pub async fn eval_script(&self, source: &str, args: &[serde_json::Value], options: RunOptions) -> Run<serde_json::Value> {
+    let source = source.to_string();
     let args = args.to_vec();
-    let redactor = self.config.redactor.clone();
     let run = self
       .run(
         options,
-        Box::new(move |ctx| {
-          Box::pin(async move {
-            install_args(&ctx, &args)?;
-            // One line of wrapper before the user's source, so a
-            // reported position is offset by one.
-            let wrapped = format!("(async () => {{\n{source_owned}\n}})()");
-            let promise: rquickjs::Promise<'_> = ctx.eval(wrapped.as_bytes()).map_err(|e| {
-              ScriptError::from_caught_offset(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned, 1)
-            })?;
-            let value: Value<'_> = promise.into_future::<Value<'_>>().await.map_err(|e| {
-              ScriptError::from_caught_offset(&ctx, rquickjs::CaughtError::from_error(&ctx, e), &source_owned, 1)
-            })?;
-            Ok(crate::value::value_to_json(&ctx, value).unwrap_or(serde_json::Value::Null))
-          })
-        }),
+        Box::new(move |ctx| Box::pin(async move { script_body(&ctx, &source, &args).await })),
       )
       .await;
-    redact_run(run, redactor.as_deref())
+    self.redact_run(run)
   }
 
   /// Evaluate a precompiled ES module with `args` bound as the `args`
@@ -785,41 +765,12 @@ impl Runtime {
     options: RunOptions,
   ) -> Run<serde_json::Value> {
     let bytecode = Arc::clone(&module.bytecode);
-    let label = module.module_name.clone();
     let mapper = module.mapper();
     let args = args.to_vec();
-    let redactor = self.config.redactor.clone();
     let run = self
       .run(
         options,
-        Box::new(move |ctx| {
-          Box::pin(async move {
-            crate::source_map::register_bundle(&ctx, mapper);
-            install_args(&ctx, &args)?;
-            // SAFETY: `bytecode` was produced by `Module::write` by this
-            // exact rquickjs/QuickJS build with native endianness --
-            // either in this process or restored from a bytecode cache
-            // whose ABI tag guarantees an ABI-identical toolchain wrote
-            // it. That contract is the bundle crate's to keep.
-            #[allow(unsafe_code)]
-            let declared = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
-              Ok(m) => m,
-              Err(e) => return Err(ScriptError::from_caught(&ctx, e, &label)),
-            };
-            let (evaluated, promise) = match declared.eval().catch(&ctx) {
-              Ok(v) => v,
-              Err(e) => return Err(ScriptError::from_caught(&ctx, e, &label)),
-            };
-            if let Err(e) = promise.into_future::<()>().await.catch(&ctx) {
-              return Err(ScriptError::from_caught(&ctx, e, &label));
-            }
-            let default = evaluated
-              .namespace()
-              .and_then(|ns| ns.get::<_, Value<'_>>("default"))
-              .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
-            Ok(crate::value::value_to_json(&ctx, default).unwrap_or(serde_json::Value::Null))
-          })
-        }),
+        Box::new(move |ctx| Box::pin(async move { module_body(&ctx, &bytecode, mapper, &args).await })),
       )
       .await;
     let run = run.map_err_pos(|e| {
@@ -829,7 +780,25 @@ impl Runtime {
         e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
       }
     });
-    redact_run(run, redactor.as_deref())
+    self.redact_run(run)
+  }
+
+  /// Replace redacted values in a JSON document the way the runtime
+  /// does for its own results, for a host body that builds one.
+  pub fn redact_value(&self, value: &mut serde_json::Value) {
+    if let Some(redactor) = &self.config.redactor {
+      crate::redact::redact_json(redactor.as_ref(), value);
+    }
+  }
+
+  fn redact_run(&self, mut run: Run<serde_json::Value>) -> Run<serde_json::Value> {
+    // Console entries were redacted as they were pushed and the error in
+    // `finish`; the returned value has never been through a chokepoint
+    // until now.
+    if let Ok(value) = &mut run.result {
+      self.redact_value(value);
+    }
+    run
   }
 
   /// Declare and evaluate an ES module from source, under `name`, with
@@ -844,7 +813,6 @@ impl Runtime {
     let name = name.to_string();
     let source = source.to_string();
     let args = args.to_vec();
-    let redactor = self.config.redactor.clone();
     let run = self
       .run(
         options,
@@ -871,8 +839,91 @@ impl Runtime {
         }),
       )
       .await;
-    redact_run(run, redactor.as_deref())
+    self.redact_run(run)
   }
+}
+
+/// The body of [`Runtime::eval_script`], for a host running it under
+/// its own [`Runtime::run`] bracket with globals of its own installed
+/// first: bind `args`, wrap `source` in an async IIFE, evaluate, and
+/// answer the `return` value as JSON.
+///
+/// # Errors
+///
+/// The script's own failure, positioned in the user's source.
+pub async fn script_body<'js>(
+  ctx: &Ctx<'js>,
+  source: &str,
+  args: &[serde_json::Value],
+) -> Result<serde_json::Value, ScriptError> {
+  install_args(ctx, args)?;
+  // One line of wrapper before the user's source, so a reported
+  // position is offset by one.
+  let wrapped = format!("(async () => {{\n{source}\n}})()");
+  let promise: rquickjs::Promise<'_> = ctx
+    .eval(wrapped.as_bytes())
+    .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+  let value: Value<'_> = promise
+    .into_future::<Value<'_>>()
+    .await
+    .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+  Ok(crate::value::value_to_json(ctx, value).unwrap_or(serde_json::Value::Null))
+}
+
+/// The body of [`Runtime::eval_module`]: register the module's source
+/// map, bind `args`, load and evaluate the bytecode, and answer the
+/// `default` export as JSON.
+///
+/// # Errors
+///
+/// A load, link or evaluation failure, labelled with the module name.
+pub async fn module_body<'js>(
+  ctx: &Ctx<'js>,
+  bytecode: &[u8],
+  mapper: SourceMapper,
+  args: &[serde_json::Value],
+) -> Result<serde_json::Value, ScriptError> {
+  let label = mapper.module_name.clone();
+  crate::source_map::register_bundle(ctx, mapper);
+  install_args(ctx, args)?;
+  let evaluated = eval_bytecode(ctx, bytecode, &label).await?;
+  let default = evaluated
+    .namespace()
+    .and_then(|ns| ns.get::<_, Value<'_>>("default"))
+    .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
+  Ok(crate::value::value_to_json(ctx, default).unwrap_or(serde_json::Value::Null))
+}
+
+/// Load `bytecode` as a module named `label`, evaluate it and await its
+/// top level. The evaluated module is handed back for a caller that
+/// reads its namespace.
+///
+/// # Errors
+///
+/// A load, link or evaluation failure, labelled with `label`.
+pub async fn eval_bytecode<'js>(
+  ctx: &Ctx<'js>,
+  bytecode: &[u8],
+  label: &str,
+) -> Result<Module<'js, rquickjs::module::Evaluated>, ScriptError> {
+  // SAFETY: `bytecode` was produced by `Module::write` by this exact
+  // rquickjs/QuickJS build with native endianness -- either in this
+  // process or restored from a bytecode cache whose ABI tag guarantees
+  // an ABI-identical toolchain wrote it. That contract is the bundle
+  // crate's to keep.
+  #[allow(unsafe_code)]
+  let declared = match (unsafe { Module::load(ctx.clone(), bytecode) }).catch(ctx) {
+    Ok(m) => m,
+    Err(e) => return Err(ScriptError::from_caught(ctx, e, label)),
+  };
+  let (evaluated, promise) = match declared.eval().catch(ctx) {
+    Ok(v) => v,
+    Err(e) => return Err(ScriptError::from_caught(ctx, e, label)),
+  };
+  if let Err(e) = promise.into_future::<()>().await.catch(ctx) {
+    return Err(ScriptError::from_caught(ctx, e, label));
+  }
+  Ok(evaluated)
 }
 
 impl<T> Run<T> {
@@ -882,18 +933,6 @@ impl<T> Run<T> {
     }
     self
   }
-}
-
-fn redact_run(mut run: Run<serde_json::Value>, redactor: Option<&dyn Redactor>) -> Run<serde_json::Value> {
-  if let Some(redactor) = redactor
-    && let Ok(value) = &mut run.result
-  {
-    // Console entries were redacted as they were pushed and the error in
-    // `finish`; the returned value has never been through a chokepoint
-    // until now.
-    crate::redact::redact_json(redactor, value);
-  }
-  run
 }
 
 /// Bind `args` as the `args` global: the JS array is built directly from

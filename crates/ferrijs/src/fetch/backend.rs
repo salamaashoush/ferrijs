@@ -44,11 +44,12 @@ pub trait FetchBackend: Send + Sync {
   fn fetch(&self, request: FetchRequest) -> FetchFuture<'_>;
 
   /// The policy a request is checked against, given the realm's own.
-  /// Called synchronously inside the `fetch()` call, before any I/O.
-  /// The default is the realm's policy as is; a host with a narrower
-  /// policy of its own for some requests composes it here. It can only
-  /// add refusals: the realm's container is always consulted.
-  fn net_policy(&self, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
+  /// Called synchronously inside the `fetch()` call, before any I/O,
+  /// with the calling context. The default is the realm's policy as is;
+  /// a host with a narrower policy of its own for some requests
+  /// composes it here. It can only add refusals: the realm's container
+  /// is always consulted.
+  fn net_policy(&self, _ctx: &rquickjs::Ctx<'_>, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
     realm
   }
 }

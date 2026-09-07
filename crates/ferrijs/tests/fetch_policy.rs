@@ -162,7 +162,7 @@ impl FetchBackend for Composed {
     self.inner.fetch(request)
   }
 
-  fn net_policy(&self, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
+  fn net_policy(&self, _ctx: &rquickjs::Ctx<'_>, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
     Arc::new(Both {
       realm,
       refused: self.refused.clone(),

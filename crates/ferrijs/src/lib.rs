@@ -65,6 +65,9 @@ pub use realm::RealmOptions;
 pub use redact::{Redactor, Secrets};
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
 pub use rquickjs;
-pub use runtime::{Builder, Config, ConsoleOptions, ProcessOptions, Run, RunBody, Runtime, vm_handle};
+pub use runtime::{
+  Builder, Config, ConsoleOptions, ProcessOptions, Run, RunBody, Runtime, eval_bytecode, install_args, module_body,
+  script_body, vm_handle,
+};
 pub use source_map::{CompiledModule, LazyMap, SourceMapper};
 pub use vm::VmHandle;
