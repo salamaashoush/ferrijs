@@ -563,6 +563,7 @@ impl Bundler {
         module_name,
         bytecode: Arc::from(hit.bytecode.into_boxed_slice()),
         source_map,
+        cwd: Some(cwd.to_path_buf()),
       });
     }
 
@@ -680,6 +681,10 @@ impl Bundler {
       module_name: module_name.to_string(),
       bytecode: Arc::from(bytecode.into_boxed_slice()),
       source_map: LazyMap::from_json(source_map_json),
+      // This path is handed code that was already bundled elsewhere, so
+      // only the caller knows what its map's paths are relative to; it
+      // sets `cwd` if the answer is not the process's.
+      cwd: None,
     })
   }
 }

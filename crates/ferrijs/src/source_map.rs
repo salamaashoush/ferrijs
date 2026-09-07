@@ -82,6 +82,11 @@ pub struct SourceMapper {
   /// frames are labelled with.
   pub module_name: String,
   map: LazyMap,
+  /// Directory the bundle's own source-map paths are relative to. A
+  /// process cwd is not it: a bundler is handed a root, and a host that
+  /// bundles a suite and then runs it from somewhere else would report
+  /// every frame against a directory the sources are not under.
+  cwd: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for SourceMapper {
@@ -89,6 +94,7 @@ impl std::fmt::Debug for SourceMapper {
     f.debug_struct("SourceMapper")
       .field("module_name", &self.module_name)
       .field("mapped", &self.map.is_some())
+      .field("cwd", &self.cwd)
       .finish()
   }
 }
@@ -99,6 +105,24 @@ impl SourceMapper {
     Self {
       module_name: module_name.into(),
       map,
+      cwd: None,
+    }
+  }
+
+  /// Resolve this bundle's sources against `cwd` rather than the
+  /// process's. What a bundler sets, since it is the one that knows.
+  #[must_use]
+  pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+    self.cwd = Some(cwd.into());
+    self
+  }
+
+  /// The absolute path of an original source this bundle names.
+  #[must_use]
+  pub fn absolute(&self, source: &str) -> String {
+    match &self.cwd {
+      Some(cwd) => resolve_source(cwd, source).to_string_lossy().into_owned(),
+      None => absolute(source),
     }
   }
 
@@ -120,12 +144,19 @@ pub struct CompiledModule {
   pub module_name: String,
   pub bytecode: Arc<[u8]>,
   pub source_map: LazyMap,
+  /// The root the bundler resolved this module's imports against, which
+  /// is what its source-map paths are relative to.
+  pub cwd: Option<PathBuf>,
 }
 
 impl CompiledModule {
   #[must_use]
   pub fn mapper(&self) -> SourceMapper {
-    SourceMapper::new(self.module_name.clone(), self.source_map.clone())
+    let mapper = SourceMapper::new(self.module_name.clone(), self.source_map.clone());
+    match &self.cwd {
+      Some(cwd) => mapper.with_cwd(cwd.clone()),
+      None => mapper,
+    }
   }
 
   /// Map a bundled-output position back to the original source.
@@ -141,6 +172,7 @@ impl std::fmt::Debug for CompiledModule {
       .field("module_name", &self.module_name)
       .field("bytecode_len", &self.bytecode.len())
       .field("mapped", &self.source_map.is_some())
+      .field("cwd", &self.cwd)
       .finish()
   }
 }
@@ -244,12 +276,15 @@ pub fn remap_stack(ctx: &Ctx<'_>, stack: &str) -> String {
     }
     match parse_frame(line) {
       Some((start, end, file, l, c)) => {
-        let mapped = maps.iter().find(|m| m.module_name == file).and_then(|m| m.remap(l, c));
-        match mapped {
-          Some((src, sl, sc)) => {
+        let hit = maps
+          .iter()
+          .find(|m| m.module_name == file)
+          .and_then(|m| m.remap(l, c).map(|r| (m, r)));
+        match hit {
+          Some((mapper, (src, sl, sc))) => {
             use std::fmt::Write as _;
             out.push_str(&line[..start]);
-            let _ = write!(out, "{}:{sl}:{sc}", absolute(&src));
+            let _ = write!(out, "{}:{sl}:{sc}", mapper.absolute(&src));
             out.push_str(&line[end..]);
           },
           None => out.push_str(line),
@@ -287,7 +322,7 @@ pub fn remap(ctx: &Ctx<'_>, file: &str, line: u32, column: u32) -> Option<Positi
   }?;
   let (src, src_line, src_col) = mapper.remap(line, column)?;
   Some(Position {
-    file: absolute(&src),
+    file: mapper.absolute(&src),
     line: src_line,
     column: src_col,
   })
@@ -428,5 +463,22 @@ mod tests {
   fn normalize_collapses_dots() {
     assert_eq!(normalize_path(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
     assert_eq!(normalize_path(Path::new("/../x")), PathBuf::from("/x"));
+  }
+
+  #[test]
+  fn a_bundle_resolves_its_sources_against_its_own_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().join("suite");
+    std::fs::create_dir_all(root.join("specs")).expect("mkdir");
+    std::fs::write(root.join("specs/a.ts"), "").expect("write");
+
+    let mapper = SourceMapper::new("bundle.js", LazyMap::default()).with_cwd(&root);
+    assert_eq!(mapper.absolute("specs/a.ts"), root.join("specs/a.ts").to_string_lossy());
+    // Without one, the process cwd answers instead, which is the bug:
+    // the file it names is not the one the bundler read.
+    assert_ne!(
+      SourceMapper::new("bundle.js", LazyMap::default()).absolute("specs/a.ts"),
+      mapper.absolute("specs/a.ts")
+    );
   }
 }
