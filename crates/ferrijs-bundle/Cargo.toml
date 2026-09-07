@@ -1,0 +1,36 @@
+[package]
+name = "ferrijs-bundle"
+description = "Bundle TypeScript and node_modules with rolldown, compile the chunk to QuickJS bytecode once, and cache it on disk under an ABI tag: the front-end a ferrijs host runs real projects through."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrijs = { path = "../ferrijs", version = "0.1.0", default-features = false }
+rquickjs = { workspace = true }
+# rolldown (built on oxc) resolves the whole import graph including
+# node_modules, transpiles .ts/.tsx, tree-shakes, and emits one ESM chunk.
+rolldown = "1"
+rolldown_common = "1"
+rolldown_plugin = "1"
+# A bundle failure's own diagnostics. `BatchedBuildDiagnostic`'s Debug
+# elides the label spans, so the file and line a parse error points at
+# are only reachable through `to_diagnostic()`.
+rolldown_error = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
