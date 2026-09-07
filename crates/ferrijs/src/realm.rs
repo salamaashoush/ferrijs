@@ -57,10 +57,10 @@ impl Default for RealmOptions {
 pub fn lockdown(ctx: &Ctx<'_>, options: &RealmOptions) -> rquickjs::Result<()> {
   if let Some(resolution) = options.clock_resolution {
     let ms = resolution.as_secs_f64() * 1000.0;
-    ctx.eval::<(), _>(TAME_CLOCKS.replace("__RESOLUTION_MS__", &format!("{ms}")))?;
+    eval_internal(ctx, &TAME_CLOCKS.replace("__RESOLUTION_MS__", &format!("{ms}")))?;
   }
   if !options.eval {
-    ctx.eval::<(), _>(NO_EVAL)?;
+    eval_internal(ctx, NO_EVAL)?;
   }
   for name in &options.remove_globals {
     let globals = ctx.globals();
@@ -69,10 +69,22 @@ pub fn lockdown(ctx: &Ctx<'_>, options: &RealmOptions) -> rquickjs::Result<()> {
     }
   }
   if options.freeze_intrinsics {
-    ctx.eval::<(), _>(FREEZE_INTRINSICS)?;
+    eval_internal(ctx, FREEZE_INTRINSICS)?;
   }
   Ok(())
 }
+
+/// The runtime's own snippets run under a name a stack reader can tell
+/// from the user's script, so a thrower installed here is not reported
+/// as the user's line.
+fn eval_internal(ctx: &Ctx<'_>, source: &str) -> rquickjs::Result<()> {
+  let mut options = rquickjs::context::EvalOptions::default();
+  options.filename = Some(INTERNAL_FILE.to_string());
+  ctx.eval_with_options::<(), _>(source, options)
+}
+
+/// The file name the runtime's own snippets carry in a stack.
+pub const INTERNAL_FILE: &str = "<ferrijs:realm>";
 
 /// Replace every runtime compiler with a thrower. `Function` itself is
 /// replaced on the global and as `Function.prototype.constructor` (the

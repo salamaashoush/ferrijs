@@ -1,0 +1,27 @@
+[package]
+name = "ferrijs-cli"
+description = "Run a JavaScript or TypeScript program in a ferrijs realm from the command line, granting exactly what it may reach."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "ferrijs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrijs = { path = "../ferrijs", version = "0.1.0" }
+ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.1.0" }
+ferrijs-permissions = { workspace = true }
+clap = { version = "4", features = ["derive", "wrap_help"] }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }

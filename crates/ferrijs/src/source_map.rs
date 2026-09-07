@@ -361,13 +361,16 @@ pub fn parse_js_frames(stack: &str) -> Vec<(String, u32, u32)> {
     .collect()
 }
 
-/// The innermost frame of a stack, whatever it names: for a position
-/// when the exception object carries none.
+/// The innermost frame of a stack that is the program's own: for a
+/// position when the exception object carries none. Frames inside the
+/// runtime's snippets (a thrower installed by the realm lockdown) are
+/// skipped, since a user is looking for the line that called them.
 #[must_use]
 pub fn innermost_frame(stack: &str) -> Option<(String, u32, u32)> {
-  stack
-    .lines()
-    .find_map(|line| parse_frame(line).map(|(_, _, file, l, c)| (file.to_string(), l, c)))
+  stack.lines().find_map(|line| {
+    let (_, _, file, l, c) = parse_frame(line)?;
+    (!file.starts_with('<')).then(|| (file.to_string(), l, c))
+  })
 }
 
 /// Find the last `<file>:<line>:<col>` in a stack line: byte range of

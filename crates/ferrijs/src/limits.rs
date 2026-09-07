@@ -328,7 +328,7 @@ mod tests {
   #[test]
   fn the_earliest_of_several_budgets_wins_and_survives_the_others_ending() {
     let state = TimeoutState::new(Arc::new(NeverParked));
-    let far = state.arm(Instant::now() + Duration::from_secs(60));
+    let far = state.arm(Instant::now() + Duration::from_mins(1));
     let near = state.arm(Instant::now().checked_sub(Duration::from_secs(1)).unwrap());
     assert!(state.expired());
     // The far budget ending does not unarm the near one.
@@ -338,7 +338,7 @@ mod tests {
     assert!(!state.expired());
     // The host slot re-arms in place.
     state.arm_host(Instant::now().checked_sub(Duration::from_secs(1)).unwrap());
-    state.arm_host(Instant::now() + Duration::from_secs(60));
+    state.arm_host(Instant::now() + Duration::from_mins(1));
     assert!(!state.expired());
     state.disarm_host();
   }

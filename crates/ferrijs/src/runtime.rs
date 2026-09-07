@@ -863,8 +863,8 @@ impl Runtime {
 /// # Errors
 ///
 /// The script's own failure, positioned in the user's source.
-pub async fn script_body<'js>(
-  ctx: &Ctx<'js>,
+pub async fn script_body(
+  ctx: &Ctx<'_>,
   source: &str,
   args: &[serde_json::Value],
 ) -> Result<serde_json::Value, ScriptError> {
@@ -889,8 +889,8 @@ pub async fn script_body<'js>(
 /// # Errors
 ///
 /// A load, link or evaluation failure, labelled with the module name.
-pub async fn module_body<'js>(
-  ctx: &Ctx<'js>,
+pub async fn module_body(
+  ctx: &Ctx<'_>,
   bytecode: &[u8],
   mapper: SourceMapper,
   args: &[serde_json::Value],
