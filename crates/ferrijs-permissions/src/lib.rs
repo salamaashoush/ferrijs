@@ -964,7 +964,23 @@ impl Container {
   ///
   /// [`Denied`] when neither the policy in force nor the hook grants it.
   pub fn check_net(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
-    let result = self.effective().check_net(host, port);
+    let effective = self.effective();
+    self.check_net_under(&effective, host, port)
+  }
+
+  /// [`Self::check_net`] against a policy the caller captured earlier.
+  ///
+  /// A request future runs after the call that made it has returned,
+  /// by which time the narrowing in force may be another handler's.
+  /// The caller snapshots [`Self::effective`] synchronously and checks
+  /// every hop against that, still through this container's hook and
+  /// audit.
+  ///
+  /// # Errors
+  ///
+  /// [`Denied`] when neither `policy` nor the hook grants it.
+  pub fn check_net_under(&self, policy: &Permissions, host: &str, port: Option<u16>) -> Result<(), Denied> {
+    let result = policy.check_net(host, port);
     let resource = match port {
       Some(p) => format!("{host}:{p}"),
       None => host.to_string(),

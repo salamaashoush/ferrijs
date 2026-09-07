@@ -211,6 +211,7 @@ async fn web_globals_and_node_modules_are_served() {
         ab: atob(btoa('x')),
         clone: structuredClone({ a: [1] }),
         hasFetch: typeof fetch,
+        hasHeaders: typeof Headers,
         version: process.version.startsWith('v'),
         release: process.release.name,
         ua: navigator.userAgent.startsWith('ferrijs/'),
@@ -224,7 +225,7 @@ async fn web_globals_and_node_modules_are_served() {
     ok(&run),
     &serde_json::json!({
       "joined": "a/b", "b64": "aGk=", "host": "example.com", "q": "1", "hashLen": 32,
-      "ab": "x", "clone": { "a": [1] }, "hasFetch": "undefined", "version": true,
+      "ab": "x", "clone": { "a": [1] }, "hasFetch": "function", "hasHeaders": "function", "version": true,
       "release": "ferrijs", "ua": true,
     })
   );

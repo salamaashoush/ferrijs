@@ -370,7 +370,7 @@ pub async fn send(
 
   let guard = net_guard.as_ref().filter(|g| g.is_active());
   if let Some(g) = guard {
-    preflight(&resolved_url, g).map_err(FetchError::Blocked)?;
+    preflight(&resolved_url, g).map_err(FetchError::from)?;
   }
   // `credentials: omit` rides a jar-less client so no stored cookie is
   // sent and no `Set-Cookie` is stored.
@@ -385,7 +385,7 @@ pub async fn send(
 
   let response = 'redirects: loop {
     if let Some(g) = guard {
-      check_url(&request_url, g).map_err(FetchError::Blocked)?;
+      check_url(&request_url, g).map_err(FetchError::from)?;
     }
 
     let hop = hop_headers(

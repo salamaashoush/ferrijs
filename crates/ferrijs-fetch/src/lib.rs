@@ -36,6 +36,8 @@ pub use model::{Credentials, RedirectMode, RemoteAddr, Request, Response, Respon
 pub use multipart::{
   MultipartField, MultipartValue, multipart_boundary, multipart_boundary_of, parse_multipart, serialize_multipart,
 };
-pub use net_guard::{NetGuard, check_url, preflight};
+pub use net_guard::{GuardError, NetGuard, NetPolicy, check_url, preflight};
+/// The transport crate, for a host that needs its `Url` / `Method`.
+pub use reqwest;
 
 pub use engine::{ClientPool, send};

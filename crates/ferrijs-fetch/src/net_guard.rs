@@ -21,20 +21,63 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
-use ferrijs_permissions::{Permissions, is_metadata_ip, is_private_ip};
+use ferrijs_permissions::{Container, Denied, Permissions, is_metadata_ip, is_private_ip};
 
 /// Boxed error for the custom DNS resolver (`reqwest::dns::Resolving`
 /// resolves to `Result<Addrs, BoxError>`).
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
+/// Who decides whether a host may be reached. A bare [`Permissions`]
+/// answers from its `net` grant; a [`Container`] answers from whatever
+/// is in force and runs its hook and audit too.
+pub trait NetPolicy: Send + Sync + std::fmt::Debug {
+  /// # Errors
+  ///
+  /// [`Denied`] naming `host:port`.
+  fn check(&self, host: &str, port: Option<u16>) -> Result<(), Denied>;
+}
+
+impl NetPolicy for Permissions {
+  fn check(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
+    self.check_net(host, port)
+  }
+}
+
+impl NetPolicy for Container {
+  fn check(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
+    self.check_net(host, port)
+  }
+}
+
+/// Why a URL was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardError {
+  /// Not http or https, or no host, or unparseable.
+  Invalid(String),
+  /// A literal or resolved address in a blocked range.
+  Blocked(String),
+  /// The policy refused the host.
+  Denied(Denied),
+}
+
+impl std::fmt::Display for GuardError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::Invalid(m) | Self::Blocked(m) => f.write_str(m),
+      Self::Denied(d) => d.fmt(f),
+    }
+  }
+}
+
+impl std::error::Error for GuardError {}
+
 /// Per-request network policy. `Default` (no policy, all-false) is
 /// inert — a caller that sets nothing keeps the cached-client fast path.
 #[derive(Debug, Clone, Default)]
 pub struct NetGuard {
-  /// The `net` grant in force. `None` ⇒ any host; `Some` ⇒ its
-  /// [`Permissions::check_net`] must pass for the initial URL and every
-  /// redirect hop.
-  pub policy: Option<Arc<Permissions>>,
+  /// The `net` grant in force. `None` ⇒ any host; `Some` ⇒ its check
+  /// must pass for the initial URL and every redirect hop.
+  pub policy: Option<Arc<dyn NetPolicy>>,
   /// Block the cloud instance-metadata endpoints (169.254.169.254 /
   /// `fd00:ec2::254`) at both the URL and the resolved-address layer.
   pub block_metadata: bool,
@@ -70,26 +113,31 @@ fn ip_blocked(ip: IpAddr, block_metadata: bool, block_private: bool) -> bool {
 ///
 /// # Errors
 ///
-/// The denial reason, worded for the caller.
-pub fn check_url(url: &reqwest::Url, g: &NetGuard) -> Result<(), String> {
+/// [`GuardError`] with the reason.
+pub fn check_url(url: &reqwest::Url, g: &NetGuard) -> Result<(), GuardError> {
   let scheme = url.scheme();
   if scheme != "http" && scheme != "https" {
-    return Err(format!(
+    return Err(GuardError::Invalid(format!(
       "scheme \"{scheme}\" is not permitted by the sandbox network policy"
-    ));
+    )));
   }
   let host = url
     .host_str()
-    .ok_or_else(|| "request to a URL with no host is not permitted".to_string())?;
+    .ok_or_else(|| GuardError::Invalid("request to a URL with no host is not permitted".to_string()))?;
   if let Ok(ip) = host.parse::<IpAddr>()
     && ip_blocked(ip, g.block_metadata, g.block_private)
   {
-    return Err(format!("request to blocked address {ip} (sandbox network policy)"));
+    return Err(GuardError::Blocked(format!(
+      "request to blocked address {ip} (sandbox network policy)"
+    )));
   }
-  if let Some(policy) = &g.policy
-    && let Err(denied) = policy.check_net(host, url.port_or_known_default())
-  {
-    return Err(denied.to_string());
+  if let Some(policy) = &g.policy {
+    policy
+      .check(
+        host.trim_start_matches('[').trim_end_matches(']'),
+        url.port_or_known_default(),
+      )
+      .map_err(GuardError::Denied)?;
   }
   Ok(())
 }
@@ -99,13 +147,13 @@ pub fn check_url(url: &reqwest::Url, g: &NetGuard) -> Result<(), String> {
 ///
 /// # Errors
 ///
-/// The denial reason, worded for the caller.
-pub fn preflight(resolved_url: &str, g: &NetGuard) -> Result<(), String> {
+/// [`GuardError`] with the reason.
+pub fn preflight(resolved_url: &str, g: &NetGuard) -> Result<(), GuardError> {
   match reqwest::Url::parse(resolved_url) {
     Ok(u) => check_url(&u, g),
-    Err(_) => Err(format!(
+    Err(_) => Err(GuardError::Invalid(format!(
       "request to invalid/relative URL \"{resolved_url}\" is not permitted by the sandbox network policy"
-    )),
+    ))),
   }
 }
 
@@ -145,7 +193,7 @@ impl reqwest::dns::Resolve for GuardedResolver {
 mod tests {
   use super::*;
 
-  fn only(hosts: &[&str]) -> Arc<Permissions> {
+  fn only(hosts: &[&str]) -> Arc<dyn NetPolicy> {
     Arc::new(Permissions::none().allow_net(hosts.iter().copied()).unwrap())
   }
 
@@ -173,7 +221,10 @@ mod tests {
     assert!(check_url(&reqwest::Url::parse("https://allowed.com/x").unwrap(), &g).is_ok());
     // This is the per-hop check that closes the redirect SSRF bypass:
     // the same function the manual redirect loop calls on every hop.
-    assert!(check_url(&reqwest::Url::parse("https://evil.com/x").unwrap(), &g).is_err());
+    assert!(matches!(
+      check_url(&reqwest::Url::parse("https://evil.com/x").unwrap(), &g),
+      Err(GuardError::Denied(_))
+    ));
     // The userinfo trick does not spoof the host.
     assert!(check_url(&reqwest::Url::parse("https://allowed.com@evil.com/x").unwrap(), &g).is_err());
   }

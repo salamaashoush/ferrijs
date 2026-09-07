@@ -23,6 +23,9 @@ pub enum FetchError {
   RedirectRefused(String),
   /// The sandbox network guard denied the URL or a resolved address.
   Blocked(String),
+  /// The realm's `net` grant refused the host. Kept typed so a runtime
+  /// can throw it as the permission error it is.
+  Denied(ferrijs_permissions::Denied),
   /// A URL could not be parsed / resolved against the base URL.
   InvalidUrl(String),
   /// The response body could not be read.
@@ -44,6 +47,16 @@ impl fmt::Display for FetchError {
       | Self::Body(m)
       | Self::Bridge(m) => f.write_str(m),
       Self::TooManyRedirects(max) => write!(f, "too many redirects (max {max})"),
+      Self::Denied(d) => d.fmt(f),
+    }
+  }
+}
+
+impl From<crate::net_guard::GuardError> for FetchError {
+  fn from(e: crate::net_guard::GuardError) -> Self {
+    match e {
+      crate::net_guard::GuardError::Denied(d) => Self::Denied(d),
+      other => Self::Blocked(other.to_string()),
     }
   }
 }

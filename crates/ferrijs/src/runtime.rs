@@ -97,6 +97,10 @@ pub struct Config {
   /// Install `globalThis.fs`, the way a scripting host does. Node has no
   /// such global, so it is off unless asked for.
   pub fs_global: bool,
+  /// What `fetch` sends through. `None` installs no `fetch` at all; the
+  /// default is the standalone [`crate::fetch::Client`].
+  #[cfg(feature = "fetch")]
+  pub fetch: Option<Arc<dyn crate::fetch::FetchBackend>>,
   pub extensions: Vec<Arc<dyn Extension>>,
 }
 
@@ -139,6 +143,8 @@ impl Default for Builder {
         redactor: None,
         pause_clock: Arc::new(NeverParked),
         fs_global: false,
+        #[cfg(feature = "fetch")]
+        fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
       },
     }
@@ -211,6 +217,25 @@ impl Builder {
   #[must_use]
   pub fn fs_global(mut self, on: bool) -> Self {
     self.config.fs_global = on;
+    self
+  }
+
+  /// What `fetch` sends through, replacing the default client. A host
+  /// with its own HTTP stack installs it here; the realm's `net` grant
+  /// applies to it unchanged.
+  #[cfg(feature = "fetch")]
+  #[must_use]
+  pub fn fetch(mut self, backend: Arc<dyn crate::fetch::FetchBackend>) -> Self {
+    self.config.fetch = Some(backend);
+    self
+  }
+
+  /// No `fetch` global at all: for a realm that must have no network
+  /// entry point whatever its grants say.
+  #[cfg(feature = "fetch")]
+  #[must_use]
+  pub fn without_fetch(mut self) -> Self {
+    self.config.fetch = None;
     self
   }
 
@@ -441,6 +466,8 @@ impl Runtime {
       argv: config.process.argv.clone(),
     };
     let fs_global = config.fs_global;
+    #[cfg(feature = "fetch")]
+    let fetch_backend = config.fetch.clone();
     let realm = config.realm.clone();
     let extensions = config.extensions.clone();
 
@@ -458,6 +485,10 @@ impl Runtime {
         ferrijs_std::fs::init(&ctx).map_err(|e| fail("fs", e))?;
       }
       crate::modules::require::install(&ctx, install_registry, require_hooks).map_err(|e| fail("require", e))?;
+      #[cfg(feature = "fetch")]
+      if let Some(backend) = fetch_backend {
+        crate::fetch::install(&ctx, backend).map_err(|e| fail("fetch", e))?;
+      }
       // A console from the start, so an extension's top-level
       // `console.log` has somewhere to go; each run swaps in its own.
       install_console(&ctx, base_console).map_err(|e| fail("console", e))?;

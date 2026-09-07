@@ -177,11 +177,29 @@ impl ScriptError {
         }
         (name, message, stack, line, column)
       },
+      // A heap that cannot allocate even the error object throws a bare
+      // `null` (QuickJS's `JS_ThrowError2` falls back to it rather than
+      // recurse), so a null exception IS the out-of-memory signal. A
+      // deliberate `throw null` reports the same way; nothing else does,
+      // since `Promise.reject()` and `throw undefined` carry `undefined`.
+      rquickjs::CaughtError::Value(v) if v.is_null() => {
+        return Self {
+          kind: ScriptErrorKind::MemoryLimit,
+          name: None,
+          message: "out of memory: the engine could not allocate an error object".to_string(),
+          stack: None,
+          line: None,
+          column: None,
+          source_snippet: None,
+        };
+      },
       rquickjs::CaughtError::Value(v) => (None, format!("{v:?}"), None, None, None),
       rquickjs::CaughtError::Error(e) => (None, format!("{e}"), None, None, None),
     };
     let kind = if name.as_deref() == Some("SyntaxError") {
       ScriptErrorKind::Syntax
+    } else if name.as_deref() == Some("InternalError") && message.contains("out of memory") {
+      ScriptErrorKind::MemoryLimit
     } else {
       ScriptErrorKind::Runtime
     };
