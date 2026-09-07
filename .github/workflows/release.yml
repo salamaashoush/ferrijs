@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Draft the GitHub release first, so everything below has one place to
+  # attach to and nothing is visible until the last job un-drafts it.
+  # ---------------------------------------------------------------------------
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      # A tag that disagrees with the manifest would publish crates at one
+      # version and GitHub artifacts at another.
+      - name: Verify tag matches the workspace version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Cargo.toml is $CARGO_VERSION but the tag is $TAG_VERSION"
+            exit 1
+          fi
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "${{ steps.changelog.outputs.content }}"
+
+  # ---------------------------------------------------------------------------
+  # A tag is not a promise that CI ran on this commit. Re-run the suite here
+  # so publishing, which is irreversible, never goes out on red.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (${{ matrix.os }})
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features --no-fail-fast
+      - run: cargo test --doc --workspace --all-features
+
+  # ---------------------------------------------------------------------------
+  # `ferrijs run` as a binary, for anyone who wants the runtime without a
+  # Rust toolchain. Linux and macOS only: those are the two platforms the
+  # workspace is tested on.
+  # ---------------------------------------------------------------------------
+  build-cli:
+    name: CLI ${{ matrix.target }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p ferrijs-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p ferrijs-cli
+          fi
+
+      - name: Package
+        run: |
+          ARCHIVE="ferrijs-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" ferrijs
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
+
+  # ---------------------------------------------------------------------------
+  # crates.io, in dependency order. Each crate's `version` requirement on a
+  # sibling has to be resolvable from the index by the time the next one
+  # publishes, hence the wait between steps.
+  #
+  # Re-running a release after a partial failure is normal, so an "already
+  # exists" is a skip rather than a failure.
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish to crates.io
+    # Publishing is irreversible: a version yanked is still a version taken.
+    needs: [create-release, test, build-cli]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          for pkg in ferrijs-permissions ferrijs-fetch ferrijs-std ferrijs ferrijs-bundle ferrijs-cli; do
+            echo "--- $pkg"
+            if output=$(cargo publish -p "$pkg" --token "$CARGO_REGISTRY_TOKEN" 2>&1); then
+              echo "published $pkg"
+            elif echo "$output" | grep -q "already exists"; then
+              echo "$pkg already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+            # crates.io has to serve the new version before the crate that
+            # depends on it can resolve.
+            sleep 45
+          done
+
+  # ---------------------------------------------------------------------------
+  # Nothing is visible until every artifact is in place.
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: Publish release
+    needs: [build-cli, publish-crates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Un-draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

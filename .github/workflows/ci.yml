@@ -1,30 +1,232 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTDOCFLAGS: -Dwarnings
 
 jobs:
-  gate:
+  # ---------------------------------------------------------------------------
+  # Cheap checks. Everything expensive waits on the `basics` gate below.
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # `crates/ferrijs-std` is vendored and holds itself out of this with
+      # its own `rustfmt.toml` (`disable_all_formatting`); the workspace
+      # `ignore` key is nightly-only and only warns here.
+      - run: cargo fmt --all -- --check
+
+  typos:
+    name: Spell check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@v1
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --workspace --all-features --no-deps
+
+  basics:
+    name: Basics gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [fmt, typos, clippy, doc]
+    if: always()
+    steps:
+      - name: Verify all checks passed
+        run: |
+          jq -ce '.[] | select(.result != "success")' <<< '${{ toJson(needs) }}' \
+            && echo "One or more basic checks failed" && exit 1 \
+            || echo "Basics green"
+
+  # ---------------------------------------------------------------------------
+  # The suite. Both hosts (ferridriver, ferrimock) run on Linux and macOS, so
+  # those are the two platforms the runtime has to be green on.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (${{ matrix.os }})
+    needs: [basics]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
-      - run: cargo doc --workspace --all-features --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --all-features --no-fail-fast
+      # nextest cannot run doc tests.
+      - run: cargo test --doc --workspace --all-features
+
+  # ---------------------------------------------------------------------------
+  # A feature a host turns off must still compile without it: `fetch` is
+  # optional because ferrimock builds the realm `without_fetch`.
+  # ---------------------------------------------------------------------------
+  features:
+    name: Feature combinations
+    needs: [basics]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@cargo-hack
+      # `js-dump-leaks` is excluded: it is a debug flag compiled into the
+      # QuickJS runtime, not a surface a consumer selects.
+      - run: cargo hack check -p ferrijs --each-feature --no-dev-deps --exclude-features js-dump-leaks
+      - run: cargo hack check -p ferrijs-permissions --each-feature --no-dev-deps
+
+  # ---------------------------------------------------------------------------
+  # The declared `rust-version`, checked on exactly that toolchain rather
+  # than on whatever stable happens to be. A floor nobody compiles at
+  # drifts: this workspace claimed 1.91 while `sysinfo` needed 1.95 and
+  # rolldown's oxc tree needed 1.96.
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV 1.97
+    needs: [basics]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-features
+
+  # ---------------------------------------------------------------------------
+  # Catch publish rot before release day. Only `ferrijs-permissions` can be
+  # verified: verification builds the packaged crate against crates.io, and
+  # every other crate here depends on a sibling whose published version lags
+  # the workspace. The rest still get their manifest and file list checked.
+  # ---------------------------------------------------------------------------
+  packaging:
+    name: Publish dry-run
+    needs: [basics]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo publish --dry-run -p ferrijs-permissions
+      - name: Package every other crate
+        run: |
+          for pkg in ferrijs-fetch ferrijs-std ferrijs ferrijs-bundle ferrijs-cli; do
+            echo "--- $pkg"
+            cargo publish --dry-run --no-verify -p "$pkg"
+          done
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  lockfile:
+    name: Lockfile
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --locked --workspace --all-features
+
+  # ---------------------------------------------------------------------------
+  # One required check for branch protection.
+  # ---------------------------------------------------------------------------
+  conclusion:
+    name: CI conclusion
+    if: always()
+    needs: [test, features, msrv, packaging, security, lockfile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Result
+        run: |
+          jq -ce '.[] | select(.result != "success" and .result != "skipped")' <<< '${{ toJson(needs) }}' \
+            && echo "Some jobs failed" && exit 1 \
+            || echo "All jobs passed or were skipped"

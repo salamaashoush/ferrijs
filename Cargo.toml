@@ -5,7 +5,12 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.91.0"
+# The floor the workspace is actually verified on, which is also the
+# channel `rust-toolchain.toml` pins and the number `clippy.toml` reads.
+# It is not a lower bound anyone asked for: `sysinfo` wants 1.95 and
+# rolldown's oxc tree wants 1.96, so a smaller promise here would be one
+# `cargo check` away from being false.
+rust-version = "1.97.0"
 license = "MIT OR Apache-2.0"
 authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
 repository = "https://github.com/salamaashoush/ferrijs"
