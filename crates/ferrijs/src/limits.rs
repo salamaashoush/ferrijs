@@ -49,6 +49,17 @@ pub struct Limits {
   pub timeout: Duration,
   /// See [`DEFAULT_BACKSTOP_GRACE`].
   pub backstop_grace: Duration,
+  /// Whether a backstop fire poisons the realm. The default is `true`,
+  /// which is the safe reading: the run's future was dropped while
+  /// parked, so a half-driven promise may still hold VM state.
+  ///
+  /// A host that keeps one realm per unit of work (a mock file, a spec)
+  /// and treats a timeout as that unit's failure rather than the
+  /// realm's can set it `false`, and gets a `Timeout` it can serve the
+  /// next request through. The caveat is real and does not go away: a
+  /// continuation that later resumes runs with no budget armed, because
+  /// nothing is left to arm it against.
+  pub backstop_poisons: bool,
 }
 
 impl Default for Limits {
@@ -59,6 +70,7 @@ impl Default for Limits {
       gc_threshold: DEFAULT_GC_THRESHOLD,
       timeout: DEFAULT_TIMEOUT,
       backstop_grace: DEFAULT_BACKSTOP_GRACE,
+      backstop_poisons: true,
     }
   }
 }

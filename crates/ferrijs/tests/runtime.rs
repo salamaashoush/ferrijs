@@ -145,6 +145,34 @@ async fn a_parked_await_is_freed_by_the_backstop() {
   assert!(run.poisoned);
 }
 
+/// A host that gives each unit of work its own realm can read a
+/// backstop fire as that unit's timeout instead of the realm's death,
+/// and keep running. The caveat this trades for is stated on the flag:
+/// a continuation that resumes later has no budget armed against it.
+#[tokio::test]
+async fn a_backstop_that_does_not_poison_leaves_the_realm_usable() {
+  let rt = Runtime::builder()
+    .limits(Limits {
+      timeout: Duration::from_millis(50),
+      backstop_grace: Duration::from_millis(100),
+      backstop_poisons: false,
+      ..Limits::default()
+    })
+    .build()
+    .await
+    .expect("runtime");
+
+  let timed_out = rt
+    .eval_script("await new Promise(() => {}); return 1", &[], RunOptions::default())
+    .await;
+  assert_eq!(timed_out.err().expect("error").kind, ScriptErrorKind::Timeout);
+  assert!(!timed_out.poisoned);
+  assert!(!rt.poisoned(), "the realm still takes work");
+
+  let after = rt.eval_script("return 41 + 1", &[], RunOptions::default()).await;
+  assert_eq!(ok(&after), &serde_json::json!(42));
+}
+
 #[tokio::test]
 async fn the_memory_limit_poisons_on_exhaustion() {
   let rt = Runtime::builder()

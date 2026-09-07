@@ -750,9 +750,9 @@ impl Runtime {
 
   /// The `Run` for a backstop fire: the run was parked on a native
   /// await past the deadline, so the interrupt handler never got a
-  /// chance to halt it. The future was dropped mid-flight -- half-driven
-  /// promises may still reference VM state, so the run is always
-  /// poisoned.
+  /// chance to halt it. The future was dropped mid-flight, so by default
+  /// the realm is poisoned -- see [`crate::Limits::backstop_poisons`]
+  /// for the host that chooses otherwise.
   fn finish_backstop<T>(
     &self,
     token: crate::limits::ArmToken,
@@ -761,7 +761,10 @@ impl Runtime {
     timeout: Duration,
   ) -> Run<T> {
     self.timeout.disarm(token);
-    self.poisoned.store(true, Ordering::Relaxed);
+    let poisoned = self.config.limits.backstop_poisons;
+    if poisoned {
+      self.poisoned.store(true, Ordering::Relaxed);
+    }
     let duration_ms = elapsed_ms(started);
     Run {
       result: Err(ScriptError::timeout(
@@ -770,7 +773,7 @@ impl Runtime {
       )),
       duration_ms,
       console: console.drain(),
-      poisoned: true,
+      poisoned,
     }
   }
 
