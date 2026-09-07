@@ -353,58 +353,204 @@ async fn a_read_grant_covers_its_root_and_nothing_else() {
 }
 
 #[tokio::test]
-async fn a_narrowed_scope_follows_a_timer_callback() {
+async fn a_realm_only_narrows_and_scripts_can_query_and_drop() {
   let rt = Runtime::builder()
-    .permissions(Permissions::none().allow_env(["A", "B"]).allow_all_sys())
+    .permissions(
+      Permissions::none()
+        .allow_env(["A", "B"])
+        .allow_all_sys()
+        .deny_sys([ferrijs::SysInfo::Username]),
+    )
     .build()
     .await
     .expect("runtime");
-  // A host dispatch narrows the realm to `sys: hostname` only, arms a
-  // timer inside it, and the timer must still be narrowed when it
-  // fires after the dispatch has restored the wider policy.
-  let container = Arc::clone(rt.permissions());
-  let narrow = container.narrow(&Permissions::none().allow_sys([ferrijs::SysInfo::Hostname]));
   let run = rt
-    .run(
-      RunOptions::default(),
-      Box::new(move |ctx| {
-        Box::pin(async move {
-          let container = ferrijs::std::permissions::container(&ctx).expect("container");
-          let armed: rquickjs::Promise<'_> = container.enter(Some(narrow), || {
-            ctx.eval(
-              r"
-              new Promise((resolve) => setTimeout(() => {
-                const os = require('node:os');
-                const out = {};
-                try { os.hostname(); out.hostname = 'ok'; } catch (e) { out.hostname = e.code; }
-                try { os.cpus(); out.cpus = 'ok'; } catch (e) { out.cpus = e.code; }
-                resolve(out);
-              }, 5))
-              ",
-            )
-          })?;
-          let value: rquickjs::Value<'_> = armed
-            .into_future()
-            .await
-            .map_err(|e| ferrijs::ScriptError::from_caught(&ctx, rquickjs::CaughtError::from_error(&ctx, e), ""))?;
-          Ok(ferrijs::value::value_to_json(&ctx, value).unwrap_or_default())
-        })
-      }),
-    )
-    .await;
-  assert_eq!(
-    ok(&run),
-    &serde_json::json!({ "hostname": "ok", "cpus": "ERR_ACCESS_DENIED" })
-  );
-  // Back outside the dispatch, the realm's own policy is in force.
-  let after = rt
     .eval_script(
-      "const os = require('os'); os.cpus(); return 'ok'",
+      r"
+      const os = require('node:os');
+      const before = {
+        envA: process.permission.has('env', 'A'),
+        envAll: process.permission.has('env'),
+        sysAll: process.permission.has('sys'),
+        hostname: process.permission.has('sys', 'hostname'),
+        username: process.permission.has('sys', 'username'),
+      };
+      let userInfo;
+      try { os.userInfo(); userInfo = 'ok'; } catch (e) { userInfo = e.permission; }
+      process.permission.drop('sys', 'hostname');
+      let hostname;
+      try { os.hostname(); hostname = 'ok'; } catch (e) { hostname = e.code; }
+      process.permission.drop('env');
+      const after = { envA: process.permission.has('env', 'A'), cpus: process.permission.has('sys', 'cpus') };
+      let bad;
+      try { process.permission.has('nope'); } catch (e) { bad = e.name; }
+      return { before, userInfo, hostname, after, bad };
+      ",
       &[],
       RunOptions::default(),
     )
     .await;
-  assert_eq!(ok(&after), &serde_json::json!("ok"));
+  assert_eq!(
+    ok(&run),
+    &serde_json::json!({
+      "before": { "envA": true, "envAll": false, "sysAll": false, "hostname": true, "username": false },
+      "userInfo": "sys",
+      "hostname": "ERR_ACCESS_DENIED",
+      "after": { "envA": false, "cpus": true },
+      "bad": "TypeError",
+    })
+  );
+  // A drop is for the realm's life: the next run sees it too, and the
+  // host's own handle agrees.
+  let next = rt
+    .eval_script(
+      "return process.permission.has('sys', 'hostname')",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(ok(&next), &serde_json::json!(false));
+  assert_eq!(
+    rt.permissions().has(ferrijs::permissions::Kind::Env, Some("A")),
+    Ok(false)
+  );
+  // The host can narrow from outside as well; a wider policy changes nothing.
+  rt.permissions()
+    .revoke(&Permissions::all().deny_sys([ferrijs::SysInfo::Cpus]));
+  rt.permissions().revoke(&Permissions::all());
+  let cpus = rt
+    .eval_script(
+      "const os = require('os'); try { os.cpus(); return 'ok' } catch (e) { return e.code }",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(ok(&cpus), &serde_json::json!("ERR_ACCESS_DENIED"));
+}
+
+#[tokio::test]
+async fn a_timer_fires_under_the_realm_container() {
+  // There is one container per realm; a drop made while a timer is
+  // pending binds the callback too, because it is the same container.
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_all_sys())
+    .build()
+    .await
+    .expect("runtime");
+  let run = rt
+    .eval_script(
+      r"
+      const os = require('node:os');
+      const armed = new Promise((resolve) => setTimeout(() => {
+        try { os.hostname(); resolve('ok'); } catch (e) { resolve(e.code); }
+      }, 5));
+      process.permission.drop('sys');
+      return await armed;
+      ",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(ok(&run), &serde_json::json!("ERR_ACCESS_DENIED"));
+}
+
+#[tokio::test]
+async fn an_unserved_builtin_is_absent_not_refusing() {
+  let rt = Runtime::builder()
+    .permissions(Permissions::all())
+    .modules(ModulePolicy::default().builtins(["path", "buffer"]))
+    .build()
+    .await
+    .expect("runtime");
+  let run = rt
+    .eval_script(
+      r"
+      const out = { path: typeof require('node:path').join, buffer: typeof require('buffer').Buffer };
+      try { require('node:fs'); out.fs = 'served'; } catch (e) { out.fs = e.message.includes('not available'); }
+      try { require('os'); out.os = 'served'; } catch (e) { out.os = e.message.includes('not available'); }
+      return out;
+      ",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(
+    ok(&run),
+    &serde_json::json!({ "path": "function", "buffer": "function", "fs": true, "os": true })
+  );
+  let module = rt
+    .eval_module_source(
+      "m.mjs",
+      "import fs from 'node:fs'; export default typeof fs;",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert!(
+    module.err().is_some(),
+    "an import of an unserved builtin must not resolve"
+  );
+  let none = Runtime::builder()
+    .modules(ModulePolicy::default().no_builtins().no_files())
+    .build()
+    .await
+    .expect("runtime");
+  let refused = none
+    .eval_script(
+      "try { require('path'); return 'served' } catch (e) { return 'absent' }",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(ok(&refused), &serde_json::json!("absent"));
+}
+
+#[tokio::test]
+async fn clocks_can_be_coarsened() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(dir.path().join("f"), b"x").expect("write");
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_read([dir.path()]))
+    .realm(RealmOptions {
+      clock_resolution: Some(Duration::from_millis(100)),
+      ..RealmOptions::default()
+    })
+    .build()
+    .await
+    .expect("runtime");
+  let run = rt
+    .eval_script(
+      r"
+      const samples = [];
+      for (let i = 0; i < 5; i++) samples.push(Date.now() % 100, new Date().getTime() % 100, performance.now() % 100);
+      const [s, n] = process.hrtime();
+      const big = process.hrtime.bigint();
+      const fs = require('node:fs');
+      const stats = fs.statSync(args[0]);
+      return {
+        samples,
+        hrNs: n % 100000000,
+        bigNs: Number(big % 100000000n),
+        isDate: stats.mtime instanceof Date,
+        ctor: stats.mtime.constructor === Date,
+        name: Date.name,
+        parse: Date.parse('2020-01-01T00:00:00Z'),
+        typed: new Date(0).getTime(),
+      };
+      ",
+      &[dir.path().join("f").to_string_lossy().into_owned().into()],
+      RunOptions::default(),
+    )
+    .await;
+  let value = ok(&run);
+  assert!(value["samples"].as_array().unwrap().iter().all(|v| v == 0), "{value}");
+  assert_eq!(value["hrNs"], 0);
+  assert_eq!(value["bigNs"], 0);
+  assert_eq!(value["isDate"], true);
+  assert_eq!(value["ctor"], true);
+  assert_eq!(value["name"], "Date");
+  assert_eq!(value["parse"], 1_577_836_800_000_i64);
+  assert_eq!(value["typed"], 0);
 }
 
 #[tokio::test]

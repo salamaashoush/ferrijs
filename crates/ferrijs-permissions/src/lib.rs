@@ -7,31 +7,37 @@
 //! installs asks this crate before acting. Deny is the default for each
 //! kind; a host grants the least it can.
 //!
-//! The model is Deno's, with Node's error shape:
+//! The model is Deno's and Node's, which are the two that survived:
 //!
-//! - [`Permissions`] is the static policy: five kinds ([`Kind`]), each a
-//!   [`Allow`] of none, everything, or a list.
-//! - [`Container`] holds the policy for one realm and answers checks. It
-//!   also carries a [`Hook`] the host may install to decide dynamically
-//!   (a prompt, a policy computed at call time) and an audit callback
-//!   that sees every decision.
-//! - A container can be narrowed for the duration of a host dispatch —
-//!   a handler that declared its own smaller grants runs under the
-//!   intersection of what it asked for and what the realm has — and the
-//!   narrowing follows a scheduled callback (timer, microtask) back to
-//!   the handler that registered it.
+//! - [`Permissions`] is the policy: five kinds ([`Kind`]), each a
+//!   [`Allow`] of none, everything, or a list, plus a [`Deny`] list per
+//!   kind that overrides the allow (`read: all, deny read: /etc`).
+//! - [`Container`] holds the policy for ONE realm for the realm's whole
+//!   life. It can only ever narrow ([`Container::revoke`], irreversible,
+//!   like Node's `process.permission.drop` and Deno's `revoke`). It also
+//!   carries a [`Hook`] the host may install to grant on demand (a
+//!   prompt) and an [`Audit`] that sees every decision.
+//!
+//! What the model deliberately does NOT have is a dynamic scope: no
+//! "narrow the policy around this call and carry it into the callbacks
+//! it registers". That is Java's stack-inspection Security Manager,
+//! removed by JEP 411 as brittle, slow, and impossible to keep complete
+//! across an API surface. A host with two trust levels runs them in two
+//! realms, each with its own container, the way workerd gives each
+//! isolate its own bindings.
 //!
 //! Paths are checked twice: as written, after lexical normalisation, and
 //! as the filesystem will actually resolve them, after following every
 //! symlink in the longest existing prefix. Both must fall under a
 //! granted root, so a link planted inside an allowed directory cannot
-//! point out of it.
+//! point out of it. Node documents the opposite (links are followed out)
+//! as a hazard the operator must avoid; this does not leave it to them.
 
 use std::borrow::Cow;
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// One capability kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -473,7 +479,47 @@ impl fmt::Display for SysInfo {
   }
 }
 
-/// The static policy for one realm.
+/// What a grant carves out. A denial wins over any allow of the same
+/// kind, so a broad grant can exclude its sensitive corners:
+/// `read: All` with `deny.read: ["/etc"]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, rename_all = "camelCase"))]
+pub struct Deny {
+  pub read: Vec<PathRule>,
+  pub write: Vec<PathRule>,
+  pub net: Vec<NetRule>,
+  pub env: Vec<String>,
+  pub sys: Vec<SysInfo>,
+}
+
+impl Deny {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.read.is_empty() && self.write.is_empty() && self.net.is_empty() && self.env.is_empty() && self.sys.is_empty()
+  }
+
+  fn merged(&self, other: &Self) -> Self {
+    fn union<T: Clone + PartialEq>(a: &[T], b: &[T]) -> Vec<T> {
+      let mut out = a.to_vec();
+      for item in b {
+        if !out.contains(item) {
+          out.push(item.clone());
+        }
+      }
+      out
+    }
+    Self {
+      read: union(&self.read, &other.read),
+      write: union(&self.write, &other.write),
+      net: union(&self.net, &other.net),
+      env: union(&self.env, &other.env),
+      sys: union(&self.sys, &other.sys),
+    }
+  }
+}
+
+/// The policy for one realm.
 ///
 /// `Default` grants nothing. [`Permissions::all`] grants everything, for
 /// a host whose scripts are as trusted as the host itself.
@@ -486,6 +532,8 @@ pub struct Permissions {
   pub net: Allow<NetRule>,
   pub env: Allow<String>,
   pub sys: Allow<SysInfo>,
+  #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Deny::is_empty"))]
+  pub deny: Deny,
 }
 
 impl Permissions {
@@ -504,6 +552,7 @@ impl Permissions {
       net: Allow::All,
       env: Allow::All,
       sys: Allow::All,
+      deny: Deny::default(),
     }
   }
 
@@ -596,6 +645,59 @@ impl Permissions {
     self
   }
 
+  #[must_use]
+  pub fn deny_read<I, P>(mut self, roots: I) -> Self
+  where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+  {
+    self.deny.read.extend(roots.into_iter().map(PathRule::new));
+    self
+  }
+
+  #[must_use]
+  pub fn deny_write<I, P>(mut self, roots: I) -> Self
+  where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+  {
+    self.deny.write.extend(roots.into_iter().map(PathRule::new));
+    self
+  }
+
+  /// # Errors
+  ///
+  /// The first entry [`NetRule::parse`] refuses.
+  pub fn deny_net<I, S>(mut self, hosts: I) -> Result<Self, String>
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+  {
+    for host in hosts {
+      self.deny.net.push(NetRule::parse(host.as_ref())?);
+    }
+    Ok(self)
+  }
+
+  #[must_use]
+  pub fn deny_env<I, S>(mut self, names: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+  {
+    self.deny.env.extend(names.into_iter().map(Into::into));
+    self
+  }
+
+  #[must_use]
+  pub fn deny_sys<I>(mut self, items: I) -> Self
+  where
+    I: IntoIterator<Item = SysInfo>,
+  {
+    self.deny.sys.extend(items);
+    self
+  }
+
   /// The grant for one kind, as an untyped view for reporting.
   #[must_use]
   pub fn describe(&self, kind: Kind) -> String {
@@ -626,6 +728,7 @@ impl Permissions {
       net: self.net.intersect_with(&other.net, NetRule::subsumes),
       env: self.env.intersect_with(&other.env, |a, b| a == b),
       sys: self.sys.intersect_with(&other.sys, |a, b| a == b),
+      deny: self.deny.merged(&other.deny),
     }
   }
 
@@ -633,14 +736,14 @@ impl Permissions {
   ///
   /// [`Denied`] naming the path.
   pub fn check_read(&self, path: &Path) -> Result<(), Denied> {
-    check_path(Kind::Read, &self.read, path)
+    check_path(Kind::Read, &self.read, &self.deny.read, path)
   }
 
   /// # Errors
   ///
   /// [`Denied`] naming the path.
   pub fn check_write(&self, path: &Path) -> Result<(), Denied> {
-    check_path(Kind::Write, &self.write, path)
+    check_path(Kind::Write, &self.write, &self.deny.write, path)
   }
 
   /// `port` is the port the connection will use, so a caller passes the
@@ -652,11 +755,13 @@ impl Permissions {
   pub fn check_net(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
     let host = host.to_ascii_lowercase();
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let granted = match &self.net {
-      Allow::None => false,
-      Allow::All => true,
-      Allow::Only(rules) => rules.iter().any(|r| r.covers(host, port)),
-    };
+    let denied = self.deny.net.iter().any(|r| r.covers(host, port));
+    let granted = !denied
+      && match &self.net {
+        Allow::None => false,
+        Allow::All => true,
+        Allow::Only(rules) => rules.iter().any(|r| r.covers(host, port)),
+      };
     if granted {
       Ok(())
     } else {
@@ -673,11 +778,12 @@ impl Permissions {
   ///
   /// [`Denied`] naming the variable.
   pub fn check_env(&self, name: &str) -> Result<(), Denied> {
-    let granted = match &self.env {
-      Allow::None => false,
-      Allow::All => true,
-      Allow::Only(names) => names.iter().any(|n| n == name),
-    };
+    let granted = !self.deny.env.iter().any(|n| n == name)
+      && match &self.env {
+        Allow::None => false,
+        Allow::All => true,
+        Allow::Only(names) => names.iter().any(|n| n == name),
+      };
     if granted {
       Ok(())
     } else {
@@ -689,11 +795,12 @@ impl Permissions {
   ///
   /// [`Denied`] naming the item.
   pub fn check_sys(&self, item: SysInfo) -> Result<(), Denied> {
-    let granted = match &self.sys {
-      Allow::None => false,
-      Allow::All => true,
-      Allow::Only(items) => items.contains(&item),
-    };
+    let granted = !self.deny.sys.contains(&item)
+      && match &self.sys {
+        Allow::None => false,
+        Allow::All => true,
+        Allow::Only(items) => items.contains(&item),
+      };
     if granted {
       Ok(())
     } else {
@@ -713,19 +820,26 @@ impl Permissions {
         .filter_map(|n| std::env::var(n).ok().map(|v| (n.clone(), v)))
         .collect(),
     };
+    out.retain(|(name, _)| !self.deny.env.contains(name));
     out.sort();
     out.dedup_by(|a, b| a.0 == b.0);
     out
   }
 }
 
-fn check_path(kind: Kind, allow: &Allow<PathRule>, path: &Path) -> Result<(), Denied> {
+fn check_path(kind: Kind, allow: &Allow<PathRule>, deny: &[PathRule], path: &Path) -> Result<(), Denied> {
   let granted = match allow {
     Allow::None => false,
-    Allow::All => true,
-    Allow::Only(rules) => {
+    Allow::All if deny.is_empty() => true,
+    _ => {
       let candidate = CheckedPath::new(path);
-      rules.iter().any(|r| r.covers(&candidate))
+      let denied = deny.iter().any(|r| r.covers(&candidate));
+      !denied
+        && match allow {
+          Allow::All => true,
+          Allow::Only(rules) => rules.iter().any(|r| r.covers(&candidate)),
+          Allow::None => false,
+        }
     },
   };
   if granted {
@@ -779,16 +893,11 @@ impl fmt::Display for Denied {
 
 impl std::error::Error for Denied {}
 
-/// A request the static policy refused, offered to the [`Hook`].
+/// A request the policy refused, offered to the [`Hook`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request<'a> {
   pub kind: Kind,
   pub resource: Cow<'a, str>,
-  /// `true` when the realm is running under a narrowed scope (a host
-  /// dispatch that declared its own grants). A prompt-style hook will
-  /// usually refuse to widen those: the narrowing was the host's own
-  /// decision, made for that handler.
-  pub scoped: bool,
 }
 
 /// What a [`Hook`] answers.
@@ -829,16 +938,13 @@ where
   }
 }
 
-/// The policy for one realm, plus the hook and audit the host attached,
-/// plus whichever narrowing is in force right now.
+/// The policy for one realm, plus the hook and audit the host attached.
 ///
-/// Every check goes through here. The narrowing is a swap, not a stack:
-/// a host dispatch installs its scope around each poll of a handler and
-/// restores what it replaced, which is what keeps two interleaved
-/// handlers each under their own grants.
+/// Every check goes through here. The policy can only ever get
+/// narrower: [`Container::revoke`] intersects it with what remains,
+/// and nothing widens it except the [`Hook`], case by case.
 pub struct Container {
-  base: Arc<Permissions>,
-  scope: Mutex<Option<Arc<Permissions>>>,
+  policy: std::sync::RwLock<Arc<Permissions>>,
   hook: Option<Arc<dyn Hook>>,
   audit: Option<Arc<dyn Audit>>,
 }
@@ -846,8 +952,7 @@ pub struct Container {
 impl fmt::Debug for Container {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("Container")
-      .field("base", &self.base)
-      .field("scope", &self.active())
+      .field("policy", &self.permissions())
       .field("hook", &self.hook.as_ref().map(|_| "..."))
       .field("audit", &self.audit.as_ref().map(|_| "..."))
       .finish()
@@ -856,10 +961,9 @@ impl fmt::Debug for Container {
 
 impl Container {
   #[must_use]
-  pub fn new(base: Permissions) -> Self {
+  pub fn new(policy: Permissions) -> Self {
     Self {
-      base: Arc::new(base),
-      scope: Mutex::new(None),
+      policy: std::sync::RwLock::new(Arc::new(policy)),
       hook: None,
       audit: None,
     }
@@ -877,59 +981,45 @@ impl Container {
     self
   }
 
-  /// The realm's own policy, before any narrowing.
+  /// The policy in force. A snapshot: a later [`Self::revoke`] does not
+  /// change the `Arc` handed out.
   #[must_use]
-  pub fn base(&self) -> &Permissions {
-    &self.base
+  pub fn permissions(&self) -> Arc<Permissions> {
+    Arc::clone(&self.policy.read().unwrap_or_else(std::sync::PoisonError::into_inner))
   }
 
-  /// The narrowing in force, if any.
-  #[must_use]
-  pub fn active(&self) -> Option<Arc<Permissions>> {
-    self
-      .scope
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .clone()
+  /// Narrow the policy to what it and `remaining` both grant.
+  /// Irreversible: there is no call that widens.
+  pub fn revoke(&self, remaining: &Permissions) {
+    let mut guard = self.policy.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Arc::new(guard.intersect(remaining));
   }
 
-  /// The policy checks are answered against right now.
-  #[must_use]
-  pub fn effective(&self) -> Arc<Permissions> {
-    self.active().unwrap_or_else(|| Arc::clone(&self.base))
-  }
-
-  /// A scope for a handler that declared `declared`: never wider than
-  /// what the realm has, and never wider than what is in force now.
-  #[must_use]
-  pub fn narrow(&self, declared: &Permissions) -> Arc<Permissions> {
-    Arc::new(self.effective().intersect(declared))
-  }
-
-  /// Install `scope` (or clear it with `None`), handing back what was in
-  /// force so the caller can restore it. Callers bracket a synchronous
-  /// region — one poll of a future, one callback — and always restore.
-  pub fn swap(&self, scope: Option<Arc<Permissions>>) -> Option<Arc<Permissions>> {
-    std::mem::replace(
-      &mut *self.scope.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-      scope,
-    )
-  }
-
-  /// Run `f` with `scope` in force, restoring the previous scope after.
-  pub fn enter<R>(&self, scope: Option<Arc<Permissions>>, f: impl FnOnce() -> R) -> R {
-    let previous = self.swap(scope);
-    let out = f();
-    self.swap(previous);
-    out
+  /// Carve `resource` out of `kind` for good. `resource` is a path for
+  /// `read` / `write`, a host rule for `net`, a name for `env`, a
+  /// [`SysInfo`] name for `sys`.
+  ///
+  /// # Errors
+  ///
+  /// A `net` rule or `sys` name that does not parse.
+  pub fn deny(&self, kind: Kind, resource: &str) -> Result<(), String> {
+    let mut guard = self.policy.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut next = (**guard).clone();
+    match kind {
+      Kind::Read => next.deny.read.push(PathRule::new(resource)),
+      Kind::Write => next.deny.write.push(PathRule::new(resource)),
+      Kind::Net => next.deny.net.push(NetRule::parse(resource)?),
+      Kind::Env => next.deny.env.push(resource.to_string()),
+      Kind::Sys => next.deny.sys.push(sys_info_from_str(resource)?),
+    }
+    *guard = Arc::new(next);
+    Ok(())
   }
 
   fn decide(&self, kind: Kind, resource: &str, statically: Result<(), Denied>) -> Result<(), Denied> {
-    let scoped = self.active().is_some();
     let request = Request {
       kind,
       resource: Cow::Borrowed(resource),
-      scoped,
     };
     let outcome = match statically {
       Ok(()) => Ok(()),
@@ -946,41 +1036,25 @@ impl Container {
 
   /// # Errors
   ///
-  /// [`Denied`] when neither the policy in force nor the hook grants it.
+  /// [`Denied`] when neither the policy nor the hook grants it.
   pub fn check_read(&self, path: &Path) -> Result<(), Denied> {
-    let result = self.effective().check_read(path);
+    let result = self.permissions().check_read(path);
     self.decide(Kind::Read, &path.to_string_lossy(), result)
   }
 
   /// # Errors
   ///
-  /// [`Denied`] when neither the policy in force nor the hook grants it.
+  /// [`Denied`] when neither the policy nor the hook grants it.
   pub fn check_write(&self, path: &Path) -> Result<(), Denied> {
-    let result = self.effective().check_write(path);
+    let result = self.permissions().check_write(path);
     self.decide(Kind::Write, &path.to_string_lossy(), result)
   }
 
   /// # Errors
   ///
-  /// [`Denied`] when neither the policy in force nor the hook grants it.
+  /// [`Denied`] when neither the policy nor the hook grants it.
   pub fn check_net(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
-    let effective = self.effective();
-    self.check_net_under(&effective, host, port)
-  }
-
-  /// [`Self::check_net`] against a policy the caller captured earlier.
-  ///
-  /// A request future runs after the call that made it has returned,
-  /// by which time the narrowing in force may be another handler's.
-  /// The caller snapshots [`Self::effective`] synchronously and checks
-  /// every hop against that, still through this container's hook and
-  /// audit.
-  ///
-  /// # Errors
-  ///
-  /// [`Denied`] when neither `policy` nor the hook grants it.
-  pub fn check_net_under(&self, policy: &Permissions, host: &str, port: Option<u16>) -> Result<(), Denied> {
-    let result = policy.check_net(host, port);
+    let result = self.permissions().check_net(host, port);
     let resource = match port {
       Some(p) => format!("{host}:{p}"),
       None => host.to_string(),
@@ -990,18 +1064,89 @@ impl Container {
 
   /// # Errors
   ///
-  /// [`Denied`] when neither the policy in force nor the hook grants it.
+  /// [`Denied`] when neither the policy nor the hook grants it.
   pub fn check_env(&self, name: &str) -> Result<(), Denied> {
-    let result = self.effective().check_env(name);
+    let result = self.permissions().check_env(name);
     self.decide(Kind::Env, name, result)
   }
 
   /// # Errors
   ///
-  /// [`Denied`] when neither the policy in force nor the hook grants it.
+  /// [`Denied`] when neither the policy nor the hook grants it.
   pub fn check_sys(&self, item: SysInfo) -> Result<(), Denied> {
-    let result = self.effective().check_sys(item);
+    let result = self.permissions().check_sys(item);
     self.decide(Kind::Sys, item.as_str(), result)
+  }
+
+  /// Whether `kind` covers `resource` right now, without consulting the
+  /// hook or the audit: what a `has()`-style query answers. `None`
+  /// asks about the kind as a whole (granted in full).
+  ///
+  /// # Errors
+  ///
+  /// A `net` rule or `sys` name that does not parse.
+  pub fn has(&self, kind: Kind, resource: Option<&str>) -> Result<bool, String> {
+    let policy = self.permissions();
+    Ok(match (kind, resource) {
+      (Kind::Read, None) => policy.read.is_all() && policy.deny.read.is_empty(),
+      (Kind::Write, None) => policy.write.is_all() && policy.deny.write.is_empty(),
+      (Kind::Net, None) => policy.net.is_all() && policy.deny.net.is_empty(),
+      (Kind::Env, None) => policy.env.is_all() && policy.deny.env.is_empty(),
+      (Kind::Sys, None) => policy.sys.is_all() && policy.deny.sys.is_empty(),
+      (Kind::Read, Some(r)) => policy.check_read(Path::new(r)).is_ok(),
+      (Kind::Write, Some(r)) => policy.check_write(Path::new(r)).is_ok(),
+      (Kind::Net, Some(r)) => {
+        let rule = NetRule::parse(r)?;
+        policy.check_net(rule.host(), rule.port()).is_ok()
+      },
+      (Kind::Env, Some(r)) => policy.check_env(r).is_ok(),
+      (Kind::Sys, Some(r)) => policy.check_sys(sys_info_from_str(r)?).is_ok(),
+    })
+  }
+}
+
+fn sys_info_from_str(name: &str) -> Result<SysInfo, String> {
+  [
+    SysInfo::Hostname,
+    SysInfo::OsRelease,
+    SysInfo::OsUptime,
+    SysInfo::LoadAvg,
+    SysInfo::NetworkInterfaces,
+    SysInfo::SystemMemory,
+    SysInfo::Uid,
+    SysInfo::Gid,
+    SysInfo::Username,
+    SysInfo::Cpus,
+    SysInfo::HomeDir,
+    SysInfo::Priority,
+  ]
+  .into_iter()
+  .find(|item| item.as_str() == name)
+  .ok_or_else(|| format!("`{name}` is not a sys permission"))
+}
+
+impl std::str::FromStr for Kind {
+  type Err = String;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "read" => Ok(Self::Read),
+      "write" => Ok(Self::Write),
+      "net" => Ok(Self::Net),
+      "env" => Ok(Self::Env),
+      "sys" => Ok(Self::Sys),
+      other => Err(format!(
+        "`{other}` is not a permission kind (read, write, net, env, sys)"
+      )),
+    }
+  }
+}
+
+impl std::str::FromStr for SysInfo {
+  type Err = String;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    sys_info_from_str(s)
   }
 }
 
@@ -1181,17 +1326,44 @@ mod tests {
   }
 
   #[test]
-  fn container_swaps_scopes_and_restores() {
+  fn deny_overrides_allow() {
+    let p = Permissions::all()
+      .deny_read(["/etc"])
+      .deny_net(["*.internal"])
+      .unwrap()
+      .deny_env(["SECRET"])
+      .deny_sys([SysInfo::Username]);
+    assert!(p.check_read(Path::new("/etc/passwd")).is_err());
+    assert!(p.check_read(Path::new("/var/log")).is_ok());
+    assert!(p.check_net("db.internal", Some(5432)).is_err());
+    assert!(p.check_net("example.com", Some(443)).is_ok());
+    assert!(p.check_env("SECRET").is_err());
+    assert!(p.check_env("HOME").is_ok());
+    assert!(p.check_sys(SysInfo::Username).is_err());
+    assert!(p.check_sys(SysInfo::Hostname).is_ok());
+    assert!(!p.env_snapshot().iter().any(|(k, _)| k == "SECRET"));
+  }
+
+  #[test]
+  fn a_container_only_narrows() {
     let c = Container::new(Permissions::all());
-    let narrow = c.narrow(&Permissions::none().allow_env(["ONLY"]));
     assert!(c.check_env("ANY").is_ok());
-    c.enter(Some(narrow), || {
-      assert!(c.check_env("ONLY").is_ok());
-      assert!(c.check_env("ANY").is_err());
-      assert!(c.active().is_some());
-    });
-    assert!(c.active().is_none());
-    assert!(c.check_env("ANY").is_ok());
+    assert_eq!(c.has(Kind::Env, None), Ok(true));
+    c.revoke(&Permissions::all().allow_env(["ONLY"]));
+    assert!(c.check_env("ONLY").is_ok());
+    assert!(c.check_env("ANY").is_err());
+    assert_eq!(c.has(Kind::Env, None), Ok(false));
+    assert_eq!(c.has(Kind::Env, Some("ONLY")), Ok(true));
+    // Revoking with a wider policy changes nothing.
+    c.revoke(&Permissions::all());
+    assert!(c.check_env("ANY").is_err());
+    c.deny(Kind::Env, "ONLY").unwrap();
+    assert!(c.check_env("ONLY").is_err());
+    c.deny(Kind::Net, "*.internal").unwrap();
+    assert!(c.check_net("x.internal", Some(80)).is_err());
+    assert!(c.check_net("example.com", Some(80)).is_ok());
+    assert_eq!(c.has(Kind::Net, Some("example.com:80")), Ok(true));
+    assert!(c.deny(Kind::Sys, "nope").is_err());
   }
 
   #[test]
@@ -1257,14 +1429,19 @@ mod tests {
   #[cfg(feature = "serde")]
   #[test]
   fn serde_shape_is_bool_or_list() {
-    let doc = r#"{"read": true, "write": ["/srv/out"], "net": ["*.acme.com:443"], "env": false, "sys": ["hostname"]}"#;
+    let doc = r#"{"read": true, "write": ["/srv/out"], "net": ["*.acme.com:443"], "env": false, "sys": ["hostname"], "deny": {"read": ["/etc"]}}"#;
     let p: Permissions = serde_json::from_str(doc).unwrap();
     assert!(p.read.is_all());
     assert_eq!(p.write.entries().len(), 1);
     assert!(p.env.is_none());
     assert_eq!(p.sys.entries(), &[SysInfo::Hostname]);
+    assert_eq!(p.deny.read.len(), 1);
+    assert!(p.check_read(Path::new("/etc/hosts")).is_err());
     let back = serde_json::to_value(&p).unwrap();
     assert_eq!(back["read"], serde_json::Value::Bool(true));
     assert_eq!(back["net"][0], "*.acme.com:443");
+    assert_eq!(back["deny"]["read"][0], "/etc");
+    let plain: Permissions = serde_json::from_str(r#"{"read": true}"#).unwrap();
+    assert!(serde_json::to_value(&plain).unwrap().get("deny").is_none());
   }
 }

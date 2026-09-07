@@ -28,6 +28,7 @@ pub const PROCESS_MEMBERS: &[&str] = &[
   "exit",
   "hrtime",
   "nextTick",
+  "permission",
   "pid",
   "platform",
   "release",
@@ -205,6 +206,37 @@ pub fn install(ctx: &Ctx<'_>, options: &ProcessOptions) -> rquickjs::Result<()> 
       ))
     }),
   )?;
+
+  // permission: Node's `process.permission.has(scope, reference)`, plus
+  // `drop`, which only ever narrows. The scopes are this runtime's
+  // (`read`, `write`, `net`, `env`, `sys`), not Node's `fs.read`
+  // spellings: a script that reads them can see exactly the model it is
+  // running under.
+  let permission = Object::new(ctx.clone())?;
+  permission.set(
+    "has",
+    Func::from(|ctx: Ctx<'_>, scope: String, reference: Rest<Value<'_>>| -> rquickjs::Result<bool> {
+      let reference = reference
+        .0
+        .first()
+        .and_then(|v| v.as_string())
+        .and_then(|s| s.to_string().ok());
+      crate::permissions::has(&ctx, &scope, reference.as_deref())
+    }),
+  )?;
+  permission.set(
+    "drop",
+    Func::from(|ctx: Ctx<'_>, scope: String, reference: Rest<Value<'_>>| -> rquickjs::Result<()> {
+      let reference = reference
+        .0
+        .first()
+        .and_then(|v| v.as_string())
+        .and_then(|s| s.to_string().ok());
+      crate::permissions::drop(&ctx, &scope, reference.as_deref())
+    }),
+  )?;
+  freeze(ctx, &permission)?;
+  p.set("permission", permission)?;
 
   g.set("process", p)?;
   Ok(())

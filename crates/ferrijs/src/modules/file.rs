@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 
 use rquickjs::{Ctx, Error, Module, Result, loader::Loader, loader::Resolver, module::Declared};
 
-/// Where relative imports resolve from, and whether they may leave it.
+/// Where relative imports resolve from, whether they may leave it, and
+/// which native modules exist at all.
 #[derive(Debug, Clone)]
 pub struct ModulePolicy {
   /// The directory an inline script's relative import resolves against.
@@ -35,16 +36,29 @@ pub struct ModulePolicy {
   /// File extensions the loader reads. A file with any other extension
   /// is refused, so a stray `.json` or `.txt` never runs as code.
   pub extensions: Vec<String>,
+  /// Which of the standard library's modules the realm serves. `All`
+  /// (the default) serves every one; `Only` names the canonical
+  /// specifiers to keep (`fs`, `path`, ... -- the bare spelling, which
+  /// covers its `node:` twin); `None` serves no native module at all.
+  /// A module not served is absent, not present and refusing.
+  pub builtins: ferrijs_permissions::Allow<String>,
+  /// Whether to serve files from disk at all. Off, an `import './x.js'`
+  /// fails to resolve: for a realm that must run only what the host
+  /// hands it.
+  pub files: bool,
 }
 
 impl ModulePolicy {
-  /// Anchored at `root`, unjailed, serving `.js` and `.mjs`.
+  /// Anchored at `root`, unjailed, serving `.js` and `.mjs` and every
+  /// builtin.
   #[must_use]
   pub fn new(root: impl Into<PathBuf>) -> Self {
     Self {
       root: root.into(),
       jail: false,
       extensions: vec!["js".to_string(), "mjs".to_string()],
+      builtins: ferrijs_permissions::Allow::All,
+      files: true,
     }
   }
 
@@ -52,6 +66,41 @@ impl ModulePolicy {
   pub fn jailed(mut self) -> Self {
     self.jail = true;
     self
+  }
+
+  /// Serve only these builtins, by canonical (bare) specifier.
+  #[must_use]
+  pub fn builtins<I, S>(mut self, names: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+  {
+    self.builtins = ferrijs_permissions::Allow::Only(names.into_iter().map(Into::into).collect());
+    self
+  }
+
+  /// Serve no builtin module.
+  #[must_use]
+  pub fn no_builtins(mut self) -> Self {
+    self.builtins = ferrijs_permissions::Allow::None;
+    self
+  }
+
+  /// Serve no file from disk.
+  #[must_use]
+  pub fn no_files(mut self) -> Self {
+    self.files = false;
+    self
+  }
+
+  /// Whether a builtin with canonical name `specifier` is served.
+  #[must_use]
+  pub fn serves_builtin(&self, specifier: &str) -> bool {
+    match &self.builtins {
+      ferrijs_permissions::Allow::All => true,
+      ferrijs_permissions::Allow::None => false,
+      ferrijs_permissions::Allow::Only(names) => names.iter().any(|n| n == specifier),
+    }
   }
 }
 
@@ -101,6 +150,12 @@ impl Resolver for FileResolver {
     name: &str,
     _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
   ) -> Result<String> {
+    if !self.policy.files {
+      return Err(Error::new_loading_message(
+        name,
+        "this realm serves no modules from disk",
+      ));
+    }
     if !(name.starts_with("./") || name.starts_with("../") || name.starts_with('/')) {
       return Err(Error::new_loading_message(
         name,

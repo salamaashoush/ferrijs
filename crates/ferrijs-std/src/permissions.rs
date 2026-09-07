@@ -11,11 +11,15 @@
 //! runtime always installs one (deny-all unless the host grants more);
 //! a host embedding this crate without the runtime calls [`install`]
 //! itself, or gets a standard library with no sandbox.
+//!
+//! The container is the realm's for its whole life and only narrows.
+//! Nothing here carries a policy across a callback: a timer fires under
+//! the same container it was armed under, because there is only one.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use ferrijs_permissions::{Container, Denied, Permissions, SysInfo};
+use ferrijs_permissions::{Container, Denied, SysInfo};
 use rquickjs::{Ctx, JsLifetime, Object, Value};
 
 struct ContainerUd(Arc<Container>);
@@ -119,37 +123,59 @@ pub fn check_sys(ctx: &Ctx<'_>, item: SysInfo) -> rquickjs::Result<()> {
   }
 }
 
-/// The policy in force right now: the realm's, or the narrowing a host
-/// dispatch installed. `None` when no container is installed.
-#[must_use]
-pub fn effective(ctx: &Ctx<'_>) -> Option<Arc<Permissions>> {
-  container(ctx).map(|c| c.effective())
+/// Whether `kind` covers `resource` right now, for a `has()`-style
+/// query. Unrestricted when no container is installed.
+///
+/// # Errors
+///
+/// A `net` rule or `sys` name that does not parse, thrown as a
+/// `TypeError`.
+pub fn has(ctx: &Ctx<'_>, kind: &str, resource: Option<&str>) -> rquickjs::Result<bool> {
+  let kind: ferrijs_permissions::Kind = kind
+    .parse()
+    .map_err(|m: String| rquickjs::Exception::throw_type(ctx, &m))?;
+  match container(ctx) {
+    Some(c) => c
+      .has(kind, resource)
+      .map_err(|m| rquickjs::Exception::throw_type(ctx, &m)),
+    None => Ok(true),
+  }
 }
 
-/// The narrowing a scheduled callback must run under, captured when a
-/// timer or microtask is registered and re-entered when it fires. This
-/// is the [`crate::web::timers::CallbackPolicy`] the runtime installs
-/// its timers with: a callback armed by a narrowed handler keeps that
-/// handler's grants instead of falling back to the realm's.
-#[derive(Clone)]
-pub struct Scope(Option<Arc<Permissions>>);
-
-impl crate::web::timers::CallbackPolicy for Scope {
-  fn capture(ctx: &Ctx<'_>) -> Option<Self> {
-    container(ctx).and_then(|c| c.active()).map(|p| Self(Some(p)))
-  }
-
-  fn enter<R>(ctx: &Ctx<'_>, policy: Option<&Self>, f: impl FnOnce() -> R) -> R {
-    match (container(ctx), policy) {
-      (Some(c), Some(scope)) => c.enter(scope.0.clone(), f),
-      _ => f(),
-    }
+/// Give up `resource` under `kind` (or the whole kind) for good: Node's
+/// `process.permission.drop`. Nothing when no container is installed.
+///
+/// # Errors
+///
+/// A kind, rule or name that does not parse, thrown as a `TypeError`.
+pub fn drop(ctx: &Ctx<'_>, kind: &str, resource: Option<&str>) -> rquickjs::Result<()> {
+  let kind: ferrijs_permissions::Kind = kind
+    .parse()
+    .map_err(|m: String| rquickjs::Exception::throw_type(ctx, &m))?;
+  let Some(c) = container(ctx) else {
+    return Ok(());
+  };
+  match resource {
+    Some(r) => c.deny(kind, r).map_err(|m| rquickjs::Exception::throw_type(ctx, &m)),
+    None => {
+      let mut remaining = (*c.permissions()).clone();
+      match kind {
+        ferrijs_permissions::Kind::Read => remaining.read = ferrijs_permissions::Allow::None,
+        ferrijs_permissions::Kind::Write => remaining.write = ferrijs_permissions::Allow::None,
+        ferrijs_permissions::Kind::Net => remaining.net = ferrijs_permissions::Allow::None,
+        ferrijs_permissions::Kind::Env => remaining.env = ferrijs_permissions::Allow::None,
+        ferrijs_permissions::Kind::Sys => remaining.sys = ferrijs_permissions::Allow::None,
+      }
+      c.revoke(&remaining);
+      Ok(())
+    },
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use ferrijs_permissions::Permissions;
 
   #[test]
   fn a_refusal_is_a_node_shaped_error() {

@@ -205,6 +205,14 @@ impl ModuleRegistry {
     Ok(())
   }
 
+  /// Keep only the modules whose canonical name `keep` accepts. What a
+  /// policy that serves a subset of the standard library applies.
+  pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+    self.modules.retain(|m| keep(m.canonical()));
+    let served: Vec<String> = self.modules.iter().flat_map(|m| m.specifiers.clone()).collect();
+    self.aliases.retain(|(_, to)| served.contains(to));
+  }
+
   /// Reserve a specifier prefix (`@acme/`) so nothing else may claim a
   /// name under it.
   pub fn reserve_prefix(&mut self, prefix: impl Into<String>) {

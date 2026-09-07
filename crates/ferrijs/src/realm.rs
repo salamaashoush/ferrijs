@@ -29,6 +29,12 @@ pub struct RealmOptions {
   /// wants no `fetch`, or no `WeakRef`, names it here rather than
   /// re-implementing the install that added it.
   pub remove_globals: Vec<String>,
+  /// Quantise every clock a script can read (`Date.now()`, `new Date()`,
+  /// `performance.now()`, `process.hrtime()`) to this resolution. A
+  /// high-resolution clock is the instrument of a timing side channel;
+  /// coarsening it is what browsers and workerd do for code they do not
+  /// trust. `None` leaves the clocks precise.
+  pub clock_resolution: Option<std::time::Duration>,
 }
 
 impl Default for RealmOptions {
@@ -37,6 +43,7 @@ impl Default for RealmOptions {
       eval: true,
       freeze_intrinsics: false,
       remove_globals: Vec::new(),
+      clock_resolution: None,
     }
   }
 }
@@ -48,6 +55,10 @@ impl Default for RealmOptions {
 ///
 /// Propagates the property writes.
 pub fn lockdown(ctx: &Ctx<'_>, options: &RealmOptions) -> rquickjs::Result<()> {
+  if let Some(resolution) = options.clock_resolution {
+    let ms = resolution.as_secs_f64() * 1000.0;
+    ctx.eval::<(), _>(TAME_CLOCKS.replace("__RESOLUTION_MS__", &format!("{ms}")))?;
+  }
   if !options.eval {
     ctx.eval::<(), _>(NO_EVAL)?;
   }
@@ -85,6 +96,56 @@ const NO_EVAL: &str = r#"
   replace(Object.getPrototypeOf(function* () {}), "GeneratorFunction");
   replace(Object.getPrototypeOf(async function* () {}), "AsyncGeneratorFunction");
   Object.defineProperty(globalThis, "eval", { value: refuse("eval"), writable: true, configurable: true });
+})();
+"#;
+
+/// Replace every clock with one that answers in multiples of the
+/// resolution. `Date` is replaced by a constructor that shares the real
+/// prototype, so a `Date` the host creates natively (a file's `mtime`)
+/// is still `instanceof Date`; `performance.now` and `process.hrtime`
+/// are wrapped in place.
+const TAME_CLOCKS: &str = r#"
+(() => {
+  const q = __RESOLUTION_MS__;
+  const floorMs = (ms) => Math.floor(ms / q) * q;
+  const RealDate = Date;
+  const realNow = RealDate.now.bind(RealDate);
+  function TamedDate(...args) {
+    if (!new.target) return new RealDate(floorMs(realNow())).toString();
+    return Reflect.construct(RealDate, args.length === 0 ? [floorMs(realNow())] : args, new.target);
+  }
+  TamedDate.prototype = RealDate.prototype;
+  Object.defineProperty(RealDate.prototype, "constructor", { value: TamedDate, writable: true, configurable: true });
+  Object.defineProperty(TamedDate, "name", { value: "Date" });
+  Object.defineProperty(TamedDate, "length", { value: 7 });
+  TamedDate.now = () => floorMs(realNow());
+  TamedDate.parse = RealDate.parse;
+  TamedDate.UTC = RealDate.UTC;
+  Object.defineProperty(globalThis, "Date", { value: TamedDate, writable: true, configurable: true });
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    const realPerfNow = performance.now.bind(performance);
+    Object.defineProperty(performance, "now", { value: () => floorMs(realPerfNow()), writable: true, configurable: true });
+  }
+  if (typeof process === "object" && typeof process.hrtime === "function") {
+    const qNs = BigInt(Math.round(q * 1e6));
+    const realHr = process.hrtime;
+    const realBig = realHr.bigint;
+    const quantised = () => {
+      const ns = realBig();
+      return ns - (ns % qNs);
+    };
+    const hrtime = (prev) => {
+      const ns = quantised();
+      let s = Number(ns / 1000000000n), n = Number(ns % 1000000000n);
+      if (Array.isArray(prev)) {
+        s -= prev[0]; n -= prev[1];
+        if (n < 0) { s -= 1; n += 1e9; }
+      }
+      return [s, n];
+    };
+    hrtime.bigint = quantised;
+    Object.defineProperty(process, "hrtime", { value: hrtime, writable: true, configurable: true });
+  }
 })();
 "#;
 

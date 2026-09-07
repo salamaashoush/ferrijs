@@ -28,12 +28,11 @@
 //! engine's [`ferrijs_fetch::Headers`] list, so the JS class and the
 //! Rust client share one set of header semantics.
 //!
-//! Net policy: `fetch` snapshots the realm's effective permissions
-//! synchronously at call time (before any I/O, while the caller's
-//! narrowing is still in force) and hands them to the engine as the
+//! Net policy: `fetch` hands the realm's container to the engine as the
 //! request's [`NetGuard`], which checks the initial URL and every
-//! redirect hop. A refusal is thrown as the `PermissionDeniedError` it
-//! is.
+//! redirect hop against it. The container only ever narrows, so a check
+//! made later in the request is never looser than one made at the call.
+//! A refusal is thrown as the `PermissionDeniedError` it is.
 
 pub mod abort;
 pub mod backend;
@@ -42,6 +41,8 @@ pub mod multipart;
 pub mod streams;
 
 pub use backend::{Client, FetchBackend, FetchFuture, FetchRequest};
+/// The engine underneath, for a host implementing its own backend.
+pub use ferrijs_fetch as engine;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,6 @@ use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
 use ferrijs_std::web::js_iterator::live_iterator;
 
-use self::backend::NetSnapshot;
 use self::body_init::{BodySource, ExtractedBody, extract_body};
 use crate::value::json_to_js;
 use ferrijs_std::buffer::Blob;
@@ -1443,18 +1443,13 @@ fn do_fetch<'js>(
       .or_else(|| input.as_string().and_then(|s| s.to_string().ok()))
       .or_else(|| input.as_object().and_then(|o| o.get::<_, String>("url").ok()))
       .unwrap_or_default();
-    // Snapshot the policy NOW (synchronously, while this `fetch()` call
-    // is still on the caller's stack) so the grant checked by the engine
-    // is the caller's, not whatever narrowing is in force by the time
-    // the request future is polled.
+    // The realm's container, composed with whatever the backend adds,
+    // taken synchronously inside the call so the backend sees the
+    // caller's context. The cloud metadata endpoints are blocked for
+    // every script `fetch` regardless of grant (closes the default-open
+    // SSRF); loopback stays reachable so local servers work.
     let net_guard = ferrijs_std::permissions::container(&ctx).map(|container| NetGuard {
-      policy: Some(Arc::new(NetSnapshot {
-        effective: container.effective(),
-        container,
-      })),
-      // The cloud metadata endpoints are blocked for every script
-      // `fetch` regardless of grant (closes the default-open SSRF);
-      // loopback stays reachable so local servers work.
+      policy: Some(backend.net_policy(container)),
       block_metadata: true,
       block_private: false,
     });

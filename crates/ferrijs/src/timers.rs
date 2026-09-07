@@ -1,12 +1,10 @@
-//! The timer globals, carrying the permission scope from registration to
-//! callback.
+//! The timer globals.
 //!
-//! The timers themselves are [`ferrijs_std::web::timers`]; what the
-//! runtime adds is the ambient state they carry. Capability follows the
-//! registrar: a timer armed (or a microtask queued) by a narrowed host
-//! handler keeps that handler's grants when it later fires from the
-//! executor or the job queue, where the resting policy would otherwise
-//! be the realm's wider one.
+//! The timers themselves are [`ferrijs_std::web::timers`]. They carry no
+//! ambient state: a callback fires under the same realm container it
+//! was armed under, because a realm has exactly one. A host that needs
+//! a timer to run under different authority than the code that armed it
+//! has two trust domains, and two trust domains are two realms.
 
 use rquickjs::Ctx;
 
@@ -17,5 +15,5 @@ use rquickjs::Ctx;
 ///
 /// Propagates the global writes.
 pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-  ferrijs_std::web::timers::install::<ferrijs_std::permissions::Scope>(ctx)
+  ferrijs_std::web::timers::install::<ferrijs_std::web::timers::NoPolicy>(ctx)
 }

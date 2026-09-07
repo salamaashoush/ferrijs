@@ -14,8 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferrijs_fetch::{Body, ClientPool, Credentials, FetchError, Headers, NetGuard, RedirectMode, Response};
-use ferrijs_permissions::{Container, Denied, Permissions};
+use ferrijs_fetch::{Body, ClientPool, Credentials, FetchError, Headers, NetGuard, NetPolicy, RedirectMode, Response};
 
 /// A request as the `fetch` global assembled it.
 #[derive(Debug)]
@@ -43,6 +42,15 @@ pub type FetchFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, FetchErr
 /// Sends what the `fetch` global assembled.
 pub trait FetchBackend: Send + Sync {
   fn fetch(&self, request: FetchRequest) -> FetchFuture<'_>;
+
+  /// The policy a request is checked against, given the realm's own.
+  /// Called synchronously inside the `fetch()` call, before any I/O.
+  /// The default is the realm's policy as is; a host with a narrower
+  /// policy of its own for some requests composes it here. It can only
+  /// add refusals: the realm's container is always consulted.
+  fn net_policy(&self, realm: Arc<dyn NetPolicy>) -> Arc<dyn NetPolicy> {
+    realm
+  }
 }
 
 /// The default backend: a standalone client with its own cookie jar,
@@ -151,20 +159,5 @@ impl FetchBackend for Client {
       )
       .await
     })
-  }
-}
-
-/// The `net` policy a request carries: the grants in force when
-/// `fetch()` was called, checked through the realm's container so its
-/// hook and audit see every hop.
-#[derive(Debug)]
-pub struct NetSnapshot {
-  pub effective: Arc<Permissions>,
-  pub container: Arc<Container>,
-}
-
-impl ferrijs_fetch::NetPolicy for NetSnapshot {
-  fn check(&self, host: &str, port: Option<u16>) -> Result<(), Denied> {
-    self.container.check_net_under(&self.effective, host, port)
   }
 }

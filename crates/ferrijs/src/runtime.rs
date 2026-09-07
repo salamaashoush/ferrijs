@@ -97,6 +97,9 @@ pub struct Config {
   /// Install `globalThis.fs`, the way a scripting host does. Node has no
   /// such global, so it is off unless asked for.
   pub fs_global: bool,
+  /// Install the timer globals (`setTimeout` and the rest). On unless a
+  /// host installs timers of its own through an extension.
+  pub timers: bool,
   /// What `fetch` sends through. `None` installs no `fetch` at all; the
   /// default is the standalone [`crate::fetch::Client`].
   #[cfg(feature = "fetch")]
@@ -115,6 +118,7 @@ impl std::fmt::Debug for Config {
       .field("identity", &self.identity)
       .field("permissions", &self.permissions)
       .field("fs_global", &self.fs_global)
+      .field("timers", &self.timers)
       .field(
         "extensions",
         &self.extensions.iter().map(|e| e.name().to_string()).collect::<Vec<_>>(),
@@ -143,6 +147,7 @@ impl Default for Builder {
         redactor: None,
         pause_clock: Arc::new(NeverParked),
         fs_global: false,
+        timers: true,
         #[cfg(feature = "fetch")]
         fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
@@ -217,6 +222,14 @@ impl Builder {
   #[must_use]
   pub fn fs_global(mut self, on: bool) -> Self {
     self.config.fs_global = on;
+    self
+  }
+
+  /// Whether the runtime installs the timer globals. A host that turns
+  /// this off installs its own through an extension.
+  #[must_use]
+  pub fn timers(mut self, on: bool) -> Self {
+    self.config.timers = on;
     self
   }
 
@@ -416,7 +429,12 @@ impl Runtime {
     // The module table: the standard library plus every extension's
     // modules, gathered BEFORE the loader is set, because `QuickJS`
     // resolves a module graph eagerly at declare time.
+    // The module table: the standard library, minus whatever the policy
+    // withholds. A module that is not served is absent -- `require` and
+    // `import` fail to resolve it -- rather than present and refusing,
+    // which is the difference between a capability and a check.
     let mut registry = ModuleRegistry::with_std();
+    registry.retain(|specifier| config.modules.serves_builtin(specifier));
     let mut resolvers: Vec<BoxResolver> = Vec::new();
     let mut loaders: Vec<BoxLoader> = Vec::new();
     let mut require_hooks: Vec<Arc<dyn RequireHook>> = Vec::new();
@@ -457,7 +475,7 @@ impl Runtime {
     let permissions = Arc::clone(&config.permissions);
     let identity = config.identity.clone();
     let process = ferrijs_std::node::process::ProcessOptions {
-      env: permissions.base().env_snapshot(),
+      env: permissions.permissions().env_snapshot(),
       cwd: config
         .process
         .cwd
@@ -466,6 +484,7 @@ impl Runtime {
       argv: config.process.argv.clone(),
     };
     let fs_global = config.fs_global;
+    let timers = config.timers;
     #[cfg(feature = "fetch")]
     let fetch_backend = config.fetch.clone();
     let realm = config.realm.clone();
@@ -479,7 +498,9 @@ impl Runtime {
 
       let fail = |what: &str, e: rquickjs::Error| ScriptError::internal(format!("failed to install {what}: {e}"));
       ferrijs_std::init(&ctx).map_err(|e| fail("the standard library", e))?;
-      crate::timers::install(&ctx).map_err(|e| fail("timers", e))?;
+      if timers {
+        crate::timers::install(&ctx).map_err(|e| fail("timers", e))?;
+      }
       ferrijs_std::node::process::install(&ctx, &process).map_err(|e| fail("process", e))?;
       if fs_global {
         ferrijs_std::fs::init(&ctx).map_err(|e| fail("fs", e))?;
