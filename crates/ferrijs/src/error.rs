@@ -227,6 +227,12 @@ fn snippet_around_line(source: &str, line_1based: u32, context_lines: u32) -> Op
     return None;
   }
   let target = line_1based.saturating_sub(1) as usize;
+  // A position past the end of `source` names a line in something
+  // else (a bundle the caller labelled with another file's text): no
+  // snippet is better than the wrong one.
+  if target >= lines.len() {
+    return None;
+  }
   let start = target.saturating_sub(context_lines as usize);
   let end = (target + context_lines as usize + 1).min(lines.len());
   let mut out = String::new();
@@ -256,5 +262,21 @@ impl std::error::Error for ScriptError {}
 impl From<rquickjs::Error> for ScriptError {
   fn from(e: rquickjs::Error) -> Self {
     Self::internal(e.to_string())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::snippet_around_line;
+
+  #[test]
+  fn a_line_past_the_end_has_no_snippet() {
+    assert_eq!(snippet_around_line("one\ntwo\nthree", 40, 2), None);
+  }
+
+  #[test]
+  fn the_target_line_is_marked() {
+    let out = snippet_around_line("one\ntwo\nthree", 2, 1).expect("snippet");
+    assert_eq!(out, "       1: one\n>>>    2: two\n       3: three\n");
   }
 }
