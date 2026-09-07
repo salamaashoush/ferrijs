@@ -52,7 +52,7 @@ impl NetPolicy for Container {
 /// Why a URL was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardError {
-  /// Not http or https, or no host, or unparseable.
+  /// Not http or https, or no host, or unparsable.
   Invalid(String),
   /// A literal or resolved address in a blocked range.
   Blocked(String),
@@ -241,7 +241,7 @@ mod tests {
   }
 
   #[test]
-  fn preflight_fails_closed_on_unparseable_url() {
+  fn preflight_fails_closed_on_unparsable_url() {
     let g = NetGuard {
       policy: Some(only(&["allowed.com"])),
       block_metadata: true,

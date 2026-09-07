@@ -155,7 +155,7 @@ fn parse_raw_set_cookie(header: &str) -> Option<Cookie> {
   for (attr, attr_value) in pairs {
     match attr.to_ascii_lowercase().as_str() {
       "expires" => {
-        // RFC 6265 §5.2.1: unparseable dates are ignored; past dates clamp
+        // RFC 6265 §5.2.1: unparsable dates are ignored; past dates clamp
         // to the earliest representable time.
         if let Ok(when) = httpdate::parse_http_date(&attr_value) {
           let secs = when

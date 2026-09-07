@@ -1,0 +1,15 @@
+[default.extend-words]
+# `ResolveablePromise` is upstream llrt's spelling of a type this crate
+# imports; renaming it here would only break the import.
+Resolveable = "Resolveable"
+resolveable = "resolveable"
+# Stylus source files, in the extension list the bundler stubs out.
+styl = "styl"
+
+[files]
+extend-exclude = [
+  "Cargo.lock",
+  # Vendored llrt, kept byte-close to upstream so a re-sync stays a
+  # readable diff. Its spelling is upstream's business.
+  "crates/ferrijs-std/",
+]

@@ -321,7 +321,7 @@ async fn response_static_helpers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn request_is_constructible_and_clonable() {
+async fn request_is_constructible_and_cloneable() {
   let o = run(
     "const a = new Request('http://x/p', { method: 'post', headers: { 'X-A': 'b' }, body: 'hello', \
        redirect: 'manual', credentials: 'include' }); \
