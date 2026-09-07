@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::future::Future;
 
-use crate::crypto::provider::{CryptoError, CryptoProvider, HmacProvider};
+use crate::crypto::provider::{modern, CryptoError, CryptoProvider, HmacProvider};
+use ctutils::CtEq;
 use crate::utils::bytes::ObjectBytes;
 use rquickjs::{Class, Ctx, FromJs, Result, Value};
 
@@ -13,7 +14,7 @@ use super::{
     crypto_key::{CryptoKey, KeyKind},
     digest,
     key_algorithm::KeyAlgorithm,
-    rsa_hash_digest,
+    rsa_hash_digest, rsa_pss_salt_length_is_valid,
     sign_algorithm::SigningAlgorithm,
     util::ResultDomExt,
 };
@@ -117,19 +118,31 @@ fn verify(
             hmac.update(data);
             let computed_signature = hmac.finalize();
 
-            computed_signature == signature
+            computed_signature.as_slice().ct_eq(signature).to_bool()
+        },
+        SigningAlgorithm::MlDsa { variant, context } => {
+            if !matches!(&key.algorithm, KeyAlgorithm::MlDsa(key_variant) if key_variant == variant)
+            {
+                return algorithm_invalid_access_error(ctx, variant.as_str());
+            }
+            modern::ml_dsa_verify(*variant, handle, signature, data, context)
+                .into_verification(ctx)?
         },
         SigningAlgorithm::RsaPss { salt_length } => {
             let (hash, digest) = rsa_hash_digest(ctx, key, data, "RSA-PSS")?;
-            crate::crypto::CRYPTO_PROVIDER
-                .rsa_pss_verify(
-                    &key.handle,
-                    signature,
-                    digest.as_ref(),
-                    *salt_length as usize,
-                    *hash,
-                )
-                .into_verification(ctx)?
+            if !rsa_pss_salt_length_is_valid(key, hash, *salt_length) {
+                false
+            } else {
+                crate::crypto::CRYPTO_PROVIDER
+                    .rsa_pss_verify(
+                        &key.handle,
+                        signature,
+                        digest.as_ref(),
+                        *salt_length as usize,
+                        *hash,
+                    )
+                    .into_verification(ctx)?
+            }
         },
         SigningAlgorithm::RsassaPkcs1v15 => {
             let (hash, digest) = rsa_hash_digest(ctx, key, data, "RSASSA-PKCS1-v1_5")?;

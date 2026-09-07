@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::exceptions::DOMException;
 use crate::utils::{bytes::ObjectBytes, object::ObjectExt};
-use rquickjs::{Ctx, Exception, FromJs, Result, Value};
+use rquickjs::{Ctx, FromJs, Result, Value};
 
-use super::{algorithm_not_supported_error, normalize_algorithm_name, to_name_and_maybe_object};
+use super::{
+    algorithm_not_supported_error, enforce_range_u8, get_optional_dictionary_value,
+    get_required_dictionary_value, normalize_algorithm_name, to_name_and_maybe_object,
+};
 
 #[derive(Debug)]
 pub enum EncryptionAlgorithm {
@@ -16,6 +19,11 @@ pub enum EncryptionAlgorithm {
         length: u32,
     },
     AesGcm {
+        iv: Box<[u8]>,
+        tag_length: u8,
+        additional_data: Option<Box<[u8]>>,
+    },
+    ChaCha20Poly1305 {
         iv: Box<[u8]>,
         tag_length: u8,
         additional_data: Option<Box<[u8]>>,
@@ -55,7 +63,8 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
                     .into_bytes(ctx)?
                     .into_boxed_slice();
 
-                let length = obj.get_required::<_, u32>("length", "algorithm")?;
+                let value = get_required_dictionary_value(&obj, "length", "algorithm")?;
+                let length = u32::from(enforce_range_u8(ctx, value, "length")?);
 
                 if !matches!(length, 32 | 64 | 128) {
                     return Err(DOMException::operation_error(
@@ -73,21 +82,16 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
                     .into_bytes(ctx)?
                     .into_boxed_slice();
 
-                //FIXME only 12? 96 maybe recommended?
-                if iv.len() != 12 {
-                    return Err(Exception::throw_type(
-                        ctx,
-                        "invalid length of iv. Currently supported 12 bytes",
-                    ));
-                }
-
                 let additional_data = obj
                     .get_optional::<_, ObjectBytes>("additionalData")?
                     .map(|v| v.into_bytes(ctx))
                     .transpose()?
                     .map(|vec| vec.into_boxed_slice());
 
-                let tag_length = obj.get_optional::<_, u8>("tagLength")?.unwrap_or(128);
+                let tag_length = get_optional_dictionary_value(&obj, "tagLength")?
+                    .map(|value| enforce_range_u8(ctx, value, "tagLength"))
+                    .transpose()?
+                    .unwrap_or(128);
 
                 //ensure tag length is supported using a match statement 32, 64, 96, 104, 112, 120, or 128
                 if !matches!(tag_length, 32 | 64 | 96 | 104 | 112 | 120 | 128) {
@@ -100,12 +104,45 @@ impl<'js> FromJs<'js> for EncryptionAlgorithm {
                     tag_length,
                 })
             },
+            "ChaCha20-Poly1305" => {
+                let obj = obj?;
+                let iv = obj
+                    .get_required::<_, ObjectBytes>("iv", "algorithm")?
+                    .into_bytes(ctx)?
+                    .into_boxed_slice();
+                let additional_data = obj
+                    .get_optional::<_, ObjectBytes>("additionalData")?
+                    .map(|value| value.into_bytes(ctx))
+                    .transpose()?
+                    .map(Vec::into_boxed_slice);
+                let tag_length = get_optional_dictionary_value(&obj, "tagLength")?
+                    .map(|value| enforce_range_u8(ctx, value, "tagLength"))
+                    .transpose()?
+                    .unwrap_or(128);
+
+                Ok(EncryptionAlgorithm::ChaCha20Poly1305 {
+                    iv,
+                    tag_length,
+                    additional_data,
+                })
+            },
             "RSA-OAEP" => {
                 let label = if let Ok(obj) = obj {
-                    obj.get_optional::<_, ObjectBytes>("label")?
-                        .map(|bytes| bytes.into_bytes(ctx))
-                        .transpose()?
-                        .map(|vec| vec.into_boxed_slice())
+                    let value: Value = obj.get("label")?;
+                    if value.is_undefined() {
+                        None
+                    } else if value.is_null() {
+                        return Err(rquickjs::Exception::throw_type(
+                            ctx,
+                            "RSA-OAEP label must be a BufferSource",
+                        ));
+                    } else {
+                        Some(
+                            ObjectBytes::from_js(ctx, value)?
+                                .into_bytes(ctx)?
+                                .into_boxed_slice(),
+                        )
+                    }
                 } else {
                     None
                 };

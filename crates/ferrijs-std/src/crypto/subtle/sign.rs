@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::future::Future;
 
-use crate::crypto::provider::{CryptoProvider, HmacProvider};
+use crate::crypto::provider::{modern, CryptoProvider, HmacProvider};
 use crate::utils::bytes::ObjectBytes;
 use rquickjs::{ArrayBuffer, Class, Ctx, FromJs, Result, Value};
 
@@ -15,6 +15,7 @@ use super::{
     rsa_hash_digest,
     sign_algorithm::SigningAlgorithm,
     util::ResultDomExt,
+    validate_rsa_pss_salt_length,
 };
 
 pub fn subtle_sign<'js>(
@@ -96,8 +97,16 @@ fn sign(
             hmac.update(data);
             hmac.finalize()
         },
+        SigningAlgorithm::MlDsa { variant, context } => {
+            if !matches!(&key.algorithm, KeyAlgorithm::MlDsa(key_variant) if key_variant == variant)
+            {
+                return algorithm_invalid_access_error(ctx, variant.as_str());
+            }
+            modern::ml_dsa_sign(*variant, handle, data, context).or_throw_dom(ctx)?
+        },
         SigningAlgorithm::RsaPss { salt_length } => {
             let (hash, digest) = rsa_hash_digest(ctx, key, data, "RSA-PSS")?;
+            validate_rsa_pss_salt_length(ctx, key, hash, *salt_length)?;
             crate::crypto::CRYPTO_PROVIDER
                 .rsa_pss_sign(&key.handle, digest.as_ref(), *salt_length as usize, *hash)
                 .or_throw_dom(ctx)?

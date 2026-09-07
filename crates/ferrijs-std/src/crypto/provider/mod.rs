@@ -32,11 +32,15 @@ mod openssl;
 #[cfg(any(feature = "crypto-ring", feature = "crypto-ring-rust"))]
 mod ring;
 
+#[cfg(feature = "_modern-webcrypto")]
+pub(crate) mod modern;
+
 #[cfg(feature = "_rustcrypto")]
 mod rust;
 
 use crate::crypto::hash::HashAlgorithm;
 use crate::crypto::subtle::EllipticCurve;
+use crate::str_enum;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -128,6 +132,94 @@ pub trait SimpleDigest: Send {
     fn finalize(self) -> Vec<u8>
     where
         Self: Sized;
+}
+
+pub const MAX_HMAC_KEY_LENGTH_BITS: u32 = 1024;
+pub(crate) fn hmac_length_is_byte_aligned(length_bits: u32) -> bool {
+    length_bits.is_multiple_of(8)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlDsaVariant {
+    MlDsa44,
+    MlDsa65,
+    MlDsa87,
+}
+
+str_enum!(
+    MlDsaVariant,
+    MlDsa44 => "ML-DSA-44",
+    MlDsa65 => "ML-DSA-65",
+    MlDsa87 => "ML-DSA-87"
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlKemVariant {
+    MlKem512,
+    MlKem768,
+    MlKem1024,
+}
+
+str_enum!(
+    MlKemVariant,
+    MlKem512 => "ML-KEM-512",
+    MlKem768 => "ML-KEM-768",
+    MlKem1024 => "ML-KEM-1024"
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridKemVariant {
+    MlKem768P256,
+    MlKem768X25519,
+    MlKem1024P384,
+}
+
+str_enum!(
+    HybridKemVariant,
+    MlKem768P256 => "MLKEM768-P256",
+    MlKem768X25519 => "MLKEM768-X25519",
+    MlKem1024P384 => "MLKEM1024-P384"
+);
+
+impl HybridKemVariant {
+    pub const fn ml_kem_variant(self) -> MlKemVariant {
+        match self {
+            Self::MlKem768P256 | Self::MlKem768X25519 => MlKemVariant::MlKem768,
+            Self::MlKem1024P384 => MlKemVariant::MlKem1024,
+        }
+    }
+
+    pub const fn public_key_length(self) -> usize {
+        match self {
+            Self::MlKem768P256 => 1249,
+            Self::MlKem768X25519 => 1216,
+            Self::MlKem1024P384 => 1665,
+        }
+    }
+
+    pub const fn ciphertext_length(self) -> usize {
+        match self {
+            Self::MlKem768P256 => 1153,
+            Self::MlKem768X25519 => 1120,
+            Self::MlKem1024P384 => 1665,
+        }
+    }
+
+    pub const fn pq_public_key_length(self) -> usize {
+        match self.ml_kem_variant() {
+            MlKemVariant::MlKem768 => 1184,
+            MlKemVariant::MlKem1024 => 1568,
+            MlKemVariant::MlKem512 => unreachable!(),
+        }
+    }
+
+    pub const fn pq_ciphertext_length(self) -> usize {
+        match self.ml_kem_variant() {
+            MlKemVariant::MlKem768 => 1088,
+            MlKemVariant::MlKem1024 => 1568,
+            MlKemVariant::MlKem512 => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -304,7 +396,11 @@ pub trait CryptoProvider {
         data: &[u8],
         curve: EllipticCurve,
     ) -> Result<EcImportResult, CryptoError>;
-    fn import_ec_public_key_spki(&self, der: &[u8]) -> Result<EcImportResult, CryptoError>;
+    fn import_ec_public_key_spki(
+        &self,
+        der: &[u8],
+        curve: EllipticCurve,
+    ) -> Result<EcImportResult, CryptoError>;
     fn import_ec_private_key_pkcs8(&self, der: &[u8]) -> Result<EcImportResult, CryptoError>;
     fn import_ec_private_key_sec1(
         &self,
@@ -683,8 +779,12 @@ macro_rules! impl_hybrid_provider {
             ) -> Result<EcImportResult, CryptoError> {
                 rust::RustCryptoProvider.import_ec_public_key_sec1(d, c)
             }
-            fn import_ec_public_key_spki(&self, d: &[u8]) -> Result<EcImportResult, CryptoError> {
-                rust::RustCryptoProvider.import_ec_public_key_spki(d)
+            fn import_ec_public_key_spki(
+                &self,
+                d: &[u8],
+                c: EllipticCurve,
+            ) -> Result<EcImportResult, CryptoError> {
+                rust::RustCryptoProvider.import_ec_public_key_spki(d, c)
             }
             fn import_ec_private_key_pkcs8(&self, d: &[u8]) -> Result<EcImportResult, CryptoError> {
                 rust::RustCryptoProvider.import_ec_private_key_pkcs8(d)
@@ -828,7 +928,7 @@ impl_hybrid_provider!(
     graviola::GraviolaRustHmac::new,
     |m: AesMode, k: &[u8], iv: &[u8], d: &[u8], aad: Option<&[u8]>| {
         if graviola_aes_supported()
-            && matches!(m, AesMode::Gcm { .. })
+            && matches!(m, AesMode::Gcm { tag_length: 128 })
             && matches!(k.len(), 16 | 32)
         {
             graviola::GraviolaProvider.aes_encrypt(m, k, iv, d, aad)
@@ -838,7 +938,7 @@ impl_hybrid_provider!(
     },
     |m: AesMode, k: &[u8], iv: &[u8], d: &[u8], aad: Option<&[u8]>| {
         if graviola_aes_supported()
-            && matches!(m, AesMode::Gcm { .. })
+            && matches!(m, AesMode::Gcm { tag_length: 128 })
             && matches!(k.len(), 16 | 32)
         {
             graviola::GraviolaProvider.aes_decrypt(m, k, iv, d, aad)
@@ -1011,6 +1111,21 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[cfg(all(feature = "crypto-graviola", not(feature = "crypto-graviola-rust")))]
+    #[test]
+    fn test_graviola_rejects_unsupported_aes_gcm_tag_length() {
+        let p = provider();
+        let result = p.aes_encrypt(
+            AesMode::Gcm { tag_length: 64 },
+            &[0; 16],
+            &[0; 12],
+            b"hello world",
+            None,
+        );
+
+        assert!(matches!(result, Err(CryptoError::UnsupportedAlgorithm)));
     }
 
     // Key generation tests - only for providers that support key generation

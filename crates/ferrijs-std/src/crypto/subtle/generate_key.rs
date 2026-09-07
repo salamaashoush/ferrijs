@@ -3,7 +3,10 @@
 use crate::exceptions::DOMException;
 use rquickjs::{object::Property, Array, Class, Ctx, Object, Result, Value};
 
-use crate::crypto::{hash::HashAlgorithm, provider::CryptoProvider, CRYPTO_PROVIDER};
+use crate::crypto::{
+    provider::{modern, CryptoProvider},
+    CRYPTO_PROVIDER,
+};
 
 use super::{
     algorithm_not_supported_error,
@@ -33,7 +36,7 @@ pub async fn subtle_generate_key<'js>(
 
     if matches!(
         key_algorithm,
-        KeyAlgorithm::Aes { .. } | KeyAlgorithm::Hmac { .. }
+        KeyAlgorithm::Aes { .. } | KeyAlgorithm::Hmac { .. } | KeyAlgorithm::ChaCha20Poly1305
     ) {
         return Ok(Class::instance(
             ctx,
@@ -90,10 +93,11 @@ fn generate_key(ctx: &Ctx<'_>, algorithm: &KeyAlgorithm) -> Result<(Vec<u8>, Vec
         },
         KeyAlgorithm::Hmac { hash, length } => {
             let key = CRYPTO_PROVIDER
-                .generate_hmac_key(*hash, *length)
+                .generate_hmac_key(*hash, *length as u16)
                 .or_throw_dom_with_msg(ctx, "HMAC key generation failed")?;
             Ok((vec![], key))
         },
+        KeyAlgorithm::ChaCha20Poly1305 => Ok((vec![], crate::crypto::random_byte_array(32))),
         KeyAlgorithm::Ec { curve, .. } => CRYPTO_PROVIDER
             .generate_ec_key(*curve)
             .or_throw_dom_with_msg(ctx, "EC key generation failed"),
@@ -103,6 +107,12 @@ fn generate_key(ctx: &Ctx<'_>, algorithm: &KeyAlgorithm) -> Result<(Vec<u8>, Vec
         KeyAlgorithm::X25519 => CRYPTO_PROVIDER
             .generate_x25519_key()
             .or_throw_dom_with_msg(ctx, "X25519 key generation failed"),
+        KeyAlgorithm::MlDsa(variant) => modern::generate_ml_dsa_key(*variant)
+            .or_throw_dom_with_msg(ctx, "ML-DSA key generation failed"),
+        KeyAlgorithm::MlKem(variant) => modern::generate_ml_kem_key(*variant)
+            .or_throw_dom_with_msg(ctx, "ML-KEM key generation failed"),
+        KeyAlgorithm::HybridKem(variant) => modern::generate_hybrid_kem_key(*variant)
+            .or_throw_dom_with_msg(ctx, "Hybrid KEM key generation failed"),
         KeyAlgorithm::Rsa {
             modulus_length,
             public_exponent,
@@ -117,20 +127,4 @@ fn generate_key(ctx: &Ctx<'_>, algorithm: &KeyAlgorithm) -> Result<(Vec<u8>, Vec
 #[allow(dead_code)]
 fn generate_symmetric_key(_ctx: &Ctx<'_>, length: usize) -> Result<Vec<u8>> {
     Ok(crate::crypto::random_byte_array(length))
-}
-
-#[allow(dead_code)]
-pub fn get_hash_length(ctx: &Ctx, hash: &HashAlgorithm, length: u16) -> Result<usize> {
-    if length == 0 {
-        return Ok(hash.block_len());
-    }
-
-    if !length.is_multiple_of(8) || (length / 8) as usize > 128 {
-        return Err(DOMException::not_supported_error(
-            ctx,
-            "Invalid HMAC key length",
-        ));
-    }
-
-    Ok((length / 8) as usize)
 }

@@ -4,9 +4,8 @@ Vendored subset of [awslabs/llrt](https://github.com/awslabs/llrt) (Apache
 License 2.0), providing the WHATWG Streams implementation, the `node:os`
 module, and the pieces they depend on for the ferridriver QuickJS runtime.
 
-Upstream: `0.8.1-beta`, re-synced against `awslabs/llrt@e987d2b` (main, 2026-08-16);
-`zlib`, `compression`, `string_decoder`, `perf_hooks`, `tty` and `navigator`
-taken from `awslabs/llrt@7b95c82` (main, 2026-08-24).
+Upstream: `0.9.0-beta`, re-synced against `awslabs/llrt@0a10758` (main,
+2026-09-06). Every module is taken from that one commit.
 
 | upstream crate     | module here  |
 | ------------------ | ------------ |
@@ -155,7 +154,7 @@ Then re-apply the local deltas below.
 Everything here is a fix or a visibility widening, never a behaviour change
 for ferridriver's convenience. Upstream candidates.
 
-0. **Upstream regressions we do NOT take.** Still true at the 2026-08-16 main sync:
+0. **Upstream regressions we do NOT take.** Still true at the 2026-09-06 main sync:
    upstream still ships the two transform-stream bugs listed in deltas 2
    and 3 below — and has since changed
    `transform_stream_error_writable_and_unblock_write` to take `_e` and
@@ -211,10 +210,12 @@ for ferridriver's convenience. Upstream candidates.
    `windows-result`, `windows-version`).
 
 9. **`os/unix.rs` — `getpwuid_r` instead of the `users` crate.** Upstream
-   reads the login name and shell through `users` 0.11, which has been
-   unmaintained since 2021. The replacement calls `getpwuid_r` directly —
-   the same call that crate makes — including its ERANGE grow-the-buffer
-   protocol.
+   read the login name and shell through `users` 0.11, which has been
+   unmaintained since 2021, and at the 2026-09-06 sync moved to `uzers`
+   0.12, the maintained fork. The replacement calls `getpwuid_r` directly —
+   the same call either crate makes — including its ERANGE grow-the-buffer
+   protocol, so the one-line upstream swap is not taken and neither crate
+   is a dependency here.
 
 10. **`os/statistics.rs` — real CPU times.** Upstream returns
     `times: { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 }` for every CPU,
@@ -242,11 +243,19 @@ for ferridriver's convenience. Upstream candidates.
 - `networkInterfaces()` marks link-local and multicast addresses
   `internal: true`; Node marks only loopback interfaces internal.
 
-13. **`buffer/` — no `Blob`, no `File`.** `llrt_buffer`'s `blob.rs` and
-    `file.rs` are not vendored and `init` does not define those classes:
-    ferridriver has its own `Blob` and `File` in `ferridriver-script`, and
-    a second implementation of each is what this crate exists to avoid.
-    `llrt_stream_web` is therefore not a dependency of this module either.
+13. **`buffer/blob.rs` and `buffer/file.rs` — three fixes.** Both files
+    ARE vendored and `init` defines both classes (an earlier version of
+    this note said neither was taken). `Blob::stream`
+    copies the bytes out before building the pull closure: upstream
+    captures the JS `ArrayBuffer` in a native closure, a cycle the
+    collector cannot see, which trips `JS_FreeRuntime`'s
+    `list_empty(&rt->gc_obj_list)` assertion at teardown.
+    `File::from_bytes` goes through `Blob::from_bytes` rather than
+    `into_js`, which made a JS array of numbers that `new Blob([...])`
+    stringified (`File.from_bytes(b"hi")` read back as `"104105"`).
+    And `buffer/mod.rs` chains `File.prototype` to `Blob.prototype` after
+    defining both classes, since rquickjs classes do not inherit and
+    upstream leaves `file instanceof Blob` false.
 
 14. **`buffer/class.rs`** is upstream's `buffer.rs`, renamed. A `buffer`
     module inside a `buffer` module trips `clippy::module_inception`,
@@ -260,9 +269,12 @@ for ferridriver's convenience. Upstream candidates.
     candidates.
 
 16. **`llrt_encoding`'s build script is not vendored.** It only calls
-    `llrt_build::set_nightly_cfg()`; this repo pins stable, so the
-    `rust_nightly` arms compile out. `rust_nightly` and `nightly` are
-    declared as known-but-never-set cfgs in `Cargo.toml`.
+    `llrt_build::set_nightly_cfg()`; this repo pins stable. As of the
+    2026-09-06 sync upstream has dropped its last `rust_nightly` arm
+    (`bytes_to_utf16_string` now uses the stable `as_chunks`), so no
+    vendored file reads either cfg; `rust_nightly` and `nightly` stay
+    declared as known-but-never-set cfgs in `Cargo.toml` so a future
+    upstream arm compiles out silently rather than warning.
 
 ## Known gaps against Node — `Buffer`
 
@@ -275,7 +287,14 @@ strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
 17. **`crypto/provider/{ring,openssl,graviola}.rs` are not vendored.**
     Only the pure-Rust provider (`crypto-rust`, upstream's own default) is
     taken; the other three back-ends would each add a system dependency.
-    Their feature names are declared as known-but-unset cfgs.
+    Their feature names are declared as known-but-unset cfgs. Upstream's
+    `_modern-webcrypto` marker (ML-DSA, ML-KEM, the hybrid KEMs,
+    ChaCha20-Poly1305, SHA-3 / cSHAKE / TurboSHAKE, `supports`,
+    `getPublicKey`, `encapsulate*` / `decapsulate*`) is declared and on:
+    every upstream provider enables it, and its back-ends (`ml-dsa`,
+    `ml-kem`, `chacha20poly1305`, `sha3`, `shake`, `cshake`, `keccak`,
+    `sponge-cursor`, `ctutils`) are all pure Rust. `provider/modern.rs`
+    is provider-independent upstream and is vendored as is.
 
 18. **`crypto` / `json` macro imports.** `iterable_enum` and `str_enum` are
     `#[macro_export]`ed, so they live at the crate root rather than under

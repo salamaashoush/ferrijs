@@ -55,6 +55,7 @@ pub mod navigator;
 pub mod node;
 pub mod os;
 pub mod perf_hooks;
+pub mod permissions;
 /// Path helpers the vendored `fs` needs (upstream `llrt_path`). The
 /// `path` MODULE is this crate's own; only these Rust helpers come from
 /// upstream, so `fs` stays byte-close to it.
