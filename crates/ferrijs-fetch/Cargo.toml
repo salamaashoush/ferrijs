@@ -1,0 +1,29 @@
+[package]
+name = "ferrijs-fetch"
+description = "A WHATWG Fetch model and one send engine over reqwest: manual redirects, a cookie bridge, multipart, and the SSRF guard the ferrijs sandbox enforces per hop."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrijs-permissions = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+httpdate = "1"
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

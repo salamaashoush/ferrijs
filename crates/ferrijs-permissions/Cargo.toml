@@ -1,0 +1,28 @@
+[package]
+name = "ferrijs-permissions"
+description = "The capability model behind the ferrijs runtime: what a script may read, write, reach on the network, see in the environment and learn about the host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `Permissions` as a config document: `read: true` grants everything,
+# `read: ["/srv/data"]` grants a list, `read: false` or absent grants
+# nothing.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
