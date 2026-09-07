@@ -2,7 +2,7 @@
 //!
 //! `new Request(input, { body })`, `new Response(body, init)` and
 //! `fetch(url, { body })` all take the same `BodyInit` union, so they all
-//! call [`extract_body`]. They used to each recognise their own subset,
+//! call `extract_body`. They used to each recognise their own subset,
 //! which is how a `Uint8Array` body reached the wire as
 //! `{"0":104,"1":105}` under `content-type: application/json`.
 //!

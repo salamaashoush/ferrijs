@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  # `rustsec/audit-check` reports its findings as a check run.
+  checks: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -78,7 +80,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo doc --workspace --all-features --no-deps
+      # `ferrijs-std` is excluded: it is vendored llrt, and its intra-doc
+      # links are upstream's to fix. Holding it to `-Dwarnings` would mean
+      # editing the tree a re-sync has to diff against.
+      - run: cargo doc --workspace --exclude ferrijs-std --all-features --no-deps
 
   basics:
     name: Basics gate

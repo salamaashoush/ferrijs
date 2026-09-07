@@ -74,7 +74,8 @@ const MAX_FETCH_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// interrupt-handler timeout does not fire during a native await).
 const FETCH_BODY_DRAIN_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// WHATWG `Headers`, a view over the core [`fetch::Headers`] list: names
+/// WHATWG `Headers`, a view over the core [`ferrijs_fetch::Headers`]
+/// list: names
 /// are lowercased and RFC7230-validated, values are HTTP-whitespace
 /// normalized and validated, `append` combines same-name values with
 /// `, ` while `set-cookie` is kept as separate entries,

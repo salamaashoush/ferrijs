@@ -12,7 +12,7 @@
 //! never carries escape codes.
 //!
 //! Every string that comes from JS is run through
-//! [`strip_ansi`](crate::console::strip_ansi) as it is written, so script
+//! [`crate::console::strip_ansi`] as it is written, so script
 //! output cannot smuggle terminal control codes into the output while our
 //! own styling survives.
 

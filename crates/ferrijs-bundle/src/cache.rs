@@ -211,7 +211,8 @@ pub fn input_set(entry_paths: &[PathBuf], modules: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Content fingerprint over a transitive input set, for an in-process
-/// cache tier that has to answer the same freshness question [`load`]
+/// cache tier that has to answer the same freshness question
+/// [`BytecodeCache::load`]
 /// answers on disk: has ANY input changed, not just the entry file.
 ///
 /// `None` when an input cannot be read — the source moved, so the cached
