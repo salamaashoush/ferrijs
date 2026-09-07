@@ -3,6 +3,7 @@
 mod access;
 mod chmod;
 mod file_handle;
+mod guard;
 mod mkdir;
 mod open;
 mod read_dir;
@@ -21,18 +22,10 @@ use rquickjs::{
 };
 use rquickjs::{Class, Ctx, Object, Result};
 
-use self::access::{access, access_sync};
-use self::chmod::{chmod, chmod_sync};
 use self::file_handle::FileHandle;
-use self::mkdir::{mkdir, mkdir_sync, mkdtemp, mkdtemp_sync};
-use self::open::open;
-use self::read_dir::{read_dir, read_dir_sync, Dirent};
-use self::read_file::{read_file, read_file_sync};
-use self::rename::{rename, rename_sync};
-use self::rm::{rmdir, rmdir_sync, rmfile, rmfile_sync};
-use self::stats::{lstat_fn, lstat_fn_sync, stat_fn, stat_fn_sync, Stats};
-use self::symlink::{symlink, symlink_sync};
-use self::write_file::{write_file, write_file_sync};
+use self::guard::*;
+use self::read_dir::Dirent;
+use self::stats::Stats;
 
 pub const CONSTANT_F_OK: u32 = 0;
 pub const CONSTANT_R_OK: u32 = 4;
@@ -112,15 +105,6 @@ impl ModuleDef for FsModule {
     }
 }
 
-/// LOCAL DELTA: `existsSync`.
-///
-/// Node has it and a large share of real code calls it; upstream llrt
-/// ships neither it nor a callback API, so without this the only way to
-/// ask whether a file is there is to catch a `stat` rejection.
-fn exists_sync(path: String) -> bool {
-    std::path::Path::new(&path).exists()
-}
-
 /// The `fs` namespace: every sync entry point, `promises`, `constants`.
 ///
 /// Shared with the module definition so an `import fs from "node:fs"` and
@@ -131,21 +115,24 @@ pub fn fill_fs<'js>(ctx: &Ctx<'js>, target: &Object<'js>) -> Result<()> {
     export_promises(ctx, &promises)?;
     export_constants(ctx, target)?;
 
+    // LOCAL DELTA: every entry point is the guarded wrapper from
+    // `guard.rs`, and `existsSync` (which upstream lacks) lives there
+    // too. See that file.
     target.set("promises", promises)?;
-    target.set("accessSync", Func::from(access_sync))?;
-    target.set("mkdirSync", Func::from(mkdir_sync))?;
-    target.set("mkdtempSync", Func::from(mkdtemp_sync))?;
-    target.set("readdirSync", Func::from(read_dir_sync))?;
-    target.set("readFileSync", Func::from(read_file_sync))?;
-    target.set("existsSync", Func::from(exists_sync))?;
-    target.set("rmdirSync", Func::from(rmdir_sync))?;
-    target.set("rmSync", Func::from(rmfile_sync))?;
-    target.set("statSync", Func::from(stat_fn_sync))?;
-    target.set("lstatSync", Func::from(lstat_fn_sync))?;
-    target.set("writeFileSync", Func::from(write_file_sync))?;
-    target.set("chmodSync", Func::from(chmod_sync))?;
-    target.set("renameSync", Func::from(rename_sync))?;
-    target.set("symlinkSync", Func::from(symlink_sync))?;
+    target.set("accessSync", Func::from(access_sync_guarded))?;
+    target.set("mkdirSync", Func::from(mkdir_sync_guarded))?;
+    target.set("mkdtempSync", Func::from(mkdtemp_sync_guarded))?;
+    target.set("readdirSync", Func::from(read_dir_sync_guarded))?;
+    target.set("readFileSync", Func::from(read_file_sync_guarded))?;
+    target.set("existsSync", Func::from(exists_sync_guarded))?;
+    target.set("rmdirSync", Func::from(rmdir_sync_guarded))?;
+    target.set("rmSync", Func::from(rmfile_sync_guarded))?;
+    target.set("statSync", Func::from(stat_sync_guarded))?;
+    target.set("lstatSync", Func::from(lstat_sync_guarded))?;
+    target.set("writeFileSync", Func::from(write_file_sync_guarded))?;
+    target.set("chmodSync", Func::from(chmod_sync_guarded))?;
+    target.set("renameSync", Func::from(rename_sync_guarded))?;
+    target.set("symlinkSync", Func::from(symlink_sync_guarded))?;
 
     Ok(())
 }
@@ -214,20 +201,20 @@ fn define_classes(ctx: &Ctx<'_>) -> Result<()> {
 fn export_promises<'js>(ctx: &Ctx<'js>, exports: &Object<'js>) -> Result<()> {
     export_constants(ctx, exports)?;
 
-    exports.set("access", Func::from(Async(access)))?;
-    exports.set("open", Func::from(Async(open)))?;
-    exports.set("readFile", Func::from(Async(read_file)))?;
-    exports.set("writeFile", Func::from(Async(write_file)))?;
-    exports.set("rename", Func::from(Async(rename)))?;
-    exports.set("readdir", Func::from(Async(read_dir)))?;
-    exports.set("mkdir", Func::from(Async(mkdir)))?;
-    exports.set("mkdtemp", Func::from(Async(mkdtemp)))?;
-    exports.set("rm", Func::from(Async(rmfile)))?;
-    exports.set("rmdir", Func::from(Async(rmdir)))?;
-    exports.set("stat", Func::from(Async(stat_fn)))?;
-    exports.set("lstat", Func::from(Async(lstat_fn)))?;
-    exports.set("chmod", Func::from(Async(chmod)))?;
-    exports.set("symlink", Func::from(Async(symlink)))?;
+    exports.set("access", Func::from(Async(access_guarded)))?;
+    exports.set("open", Func::from(Async(open_guarded)))?;
+    exports.set("readFile", Func::from(Async(read_file_guarded)))?;
+    exports.set("writeFile", Func::from(Async(write_file_guarded)))?;
+    exports.set("rename", Func::from(Async(rename_guarded)))?;
+    exports.set("readdir", Func::from(Async(read_dir_guarded)))?;
+    exports.set("mkdir", Func::from(Async(mkdir_guarded)))?;
+    exports.set("mkdtemp", Func::from(Async(mkdtemp_guarded)))?;
+    exports.set("rm", Func::from(Async(rmfile_guarded)))?;
+    exports.set("rmdir", Func::from(Async(rmdir_guarded)))?;
+    exports.set("stat", Func::from(Async(stat_guarded)))?;
+    exports.set("lstat", Func::from(Async(lstat_guarded)))?;
+    exports.set("chmod", Func::from(Async(chmod_guarded)))?;
+    exports.set("symlink", Func::from(Async(symlink_guarded)))?;
 
     Ok(())
 }

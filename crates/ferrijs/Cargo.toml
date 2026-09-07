@@ -1,0 +1,52 @@
+[package]
+name = "ferrijs"
+description = "An embeddable JavaScript runtime on QuickJS: Node and web standard globals, ES modules and require, a capability sandbox with resource limits, and an extension model for host APIs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["fetch"]
+# The WHATWG `fetch` global with `Headers` / `Request` / `Response` over
+# the `ferrijs-fetch` engine, under the realm's `net` grant.
+fetch = ["dep:ferrijs-fetch", "dep:bytes"]
+# `schemars::JsonSchema` on the result and error types, for a host that
+# publishes them as a wire contract.
+schema = ["dep:schemars"]
+# Opt-in QuickJS leak dump: makes `JS_FreeRuntime` list every object still
+# alive at teardown. The GC-cycle discipline (native closures must never
+# capture a JS value, or the collector cannot see the cycle) is otherwise
+# only observable as a crash, so this turns "did I strand something?" into
+# a readable list. Debug aid; never enable in a release build, it is a
+# compile-time flag on the QuickJS runtime itself.
+js-dump-leaks = ["rquickjs/dump-leaks"]
+
+[dependencies]
+ferrijs-std = { workspace = true }
+ferrijs-permissions = { workspace = true }
+ferrijs-fetch = { workspace = true, optional = true }
+rquickjs = { workspace = true }
+# Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
+rquickjs-serde = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true, optional = true }
+tracing = { workspace = true }
+rustc-hash = { workspace = true }
+bytes = { workspace = true, optional = true }
+sourcemap = "9"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }

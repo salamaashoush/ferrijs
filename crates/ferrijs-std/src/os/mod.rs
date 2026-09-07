@@ -138,6 +138,15 @@ impl ModuleDef for OsModule {
 /// as a synchronous `require('os')` namespace — and both must read from one
 /// place, so the body moved into a function.
 pub fn fill(target: &Object<'_>) -> Result<()> {
+    // LOCAL DELTA: every member that reveals something about the host
+    // asks the realm's `sys` grant first (see `crate::permissions`).
+    // `arch` / `platform` / `EOL` / `devNull` / `endianness` / `type` /
+    // `tmpdir` / `availableParallelism` describe the binary rather than
+    // the machine it runs on and stay open.
+    use crate::permissions::check_sys;
+    use ferrijs_permissions::SysInfo;
+    use rquickjs::{function::Opt, Value};
+
     target.set("arch", Func::from(|| ARCH))?;
     target.set(
         "availableParallelism",
@@ -146,34 +155,119 @@ pub fn fill(target: &Object<'_>) -> Result<()> {
     target.set("devNull", DEV_NULL)?;
     target.set("endianness", Func::from(get_endianness))?;
     target.set("EOL", EOL)?;
-    target.set("getPriority", Func::from(get_priority))?;
-    target.set("homedir", Func::from(get_home_dir))?;
+    target.set(
+        "getPriority",
+        Func::from(|ctx: Ctx<'_>, who: Opt<u32>| -> Result<i32> {
+            check_sys(&ctx, SysInfo::Priority)?;
+            Ok(get_priority(who))
+        }),
+    )?;
+    target.set(
+        "homedir",
+        Func::from(|ctx: Ctx<'_>| -> Result<String> {
+            check_sys(&ctx, SysInfo::HomeDir)?;
+            get_home_dir(ctx)
+        }),
+    )?;
     target.set("platform", Func::from(|| PLATFORM))?;
-    target.set("release", Func::from(get_release))?;
-    target.set("setPriority", Func::from(set_priority))?;
+    target.set(
+        "release",
+        Func::from(|ctx: Ctx<'_>| -> Result<&'static str> {
+            check_sys(&ctx, SysInfo::OsRelease)?;
+            Ok(get_release())
+        }),
+    )?;
+    target.set(
+        "setPriority",
+        Func::from(|ctx: Ctx<'_>, args: rquickjs::function::Rest<Value<'_>>| -> Result<()> {
+            check_sys(&ctx, SysInfo::Priority)?;
+            set_priority(ctx, args)
+        }),
+    )?;
     target.set("tmpdir", Func::from(get_tmp_dir))?;
     target.set("type", Func::from(get_type))?;
-    target.set("userInfo", Func::from(get_user_info))?;
-    target.set("version", Func::from(get_version))?;
+    target.set("userInfo", Func::from(user_info_guarded))?;
+    target.set(
+        "version",
+        Func::from(|ctx: Ctx<'_>| -> Result<&'static str> {
+            check_sys(&ctx, SysInfo::OsRelease)?;
+            Ok(get_version())
+        }),
+    )?;
     #[cfg(feature = "network")]
     {
-        target.set("networkInterfaces", Func::from(get_network_interfaces))?;
+        target.set("networkInterfaces", Func::from(network_interfaces_guarded))?;
     }
 
     #[cfg(feature = "statistics")]
     {
-        target.set("cpus", Func::from(get_cpus))?;
-        target.set("freemem", Func::from(get_free_mem))?;
-        target.set("totalmem", Func::from(get_total_mem))?;
+        target.set("cpus", Func::from(cpus_guarded))?;
+        target.set(
+            "freemem",
+            Func::from(|ctx: Ctx<'_>| -> Result<u64> {
+                check_sys(&ctx, SysInfo::SystemMemory)?;
+                Ok(get_free_mem())
+            }),
+        )?;
+        target.set(
+            "totalmem",
+            Func::from(|ctx: Ctx<'_>| -> Result<u64> {
+                check_sys(&ctx, SysInfo::SystemMemory)?;
+                Ok(get_total_mem())
+            }),
+        )?;
     }
     #[cfg(feature = "system")]
     {
-        target.set("hostname", Func::from(get_host_name))?;
-        target.set("loadavg", Func::from(get_load_avg))?;
-        target.set("machine", Func::from(get_machine))?;
-        target.set("uptime", Func::from(get_uptime))?;
+        target.set(
+            "hostname",
+            Func::from(|ctx: Ctx<'_>| -> Result<String> {
+                check_sys(&ctx, SysInfo::Hostname)?;
+                get_host_name(ctx)
+            }),
+        )?;
+        target.set(
+            "loadavg",
+            Func::from(|ctx: Ctx<'_>| -> Result<Vec<f64>> {
+                check_sys(&ctx, SysInfo::LoadAvg)?;
+                Ok(get_load_avg())
+            }),
+        )?;
+        target.set(
+            "machine",
+            Func::from(|ctx: Ctx<'_>| -> Result<String> {
+                check_sys(&ctx, SysInfo::OsRelease)?;
+                Ok(get_machine())
+            }),
+        )?;
+        target.set(
+            "uptime",
+            Func::from(|ctx: Ctx<'_>| -> Result<u64> {
+                check_sys(&ctx, SysInfo::OsUptime)?;
+                Ok(get_uptime())
+            }),
+        )?;
     }
     Ok(())
+}
+
+fn user_info_guarded<'js>(ctx: Ctx<'js>, options: rquickjs::function::Opt<rquickjs::Value<'js>>) -> Result<Object<'js>> {
+    crate::permissions::check_sys(&ctx, ferrijs_permissions::SysInfo::Username)?;
+    get_user_info(ctx, options)
+}
+
+#[cfg(feature = "network")]
+fn network_interfaces_guarded<'js>(
+    ctx: Ctx<'js>,
+) -> Result<std::collections::HashMap<String, Vec<Object<'js>>>> {
+    crate::permissions::check_sys(&ctx, ferrijs_permissions::SysInfo::NetworkInterfaces)?;
+    get_network_interfaces(ctx)
+}
+
+#[cfg(feature = "statistics")]
+fn cpus_guarded<'js>(ctx: Ctx<'js>) -> Result<Vec<Object<'js>>> {
+    crate::permissions::check_sys(&ctx, ferrijs_permissions::SysInfo::Cpus)?;
+    get_cpus(ctx)
 }
 
 /// A fresh object carrying every `os` export, for the `require` path.
