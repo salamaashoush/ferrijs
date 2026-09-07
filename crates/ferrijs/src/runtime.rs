@@ -654,7 +654,7 @@ impl Runtime {
       };
     }
     let timeout = self.apply_run_options(&options).await;
-    self.timeout.arm(started + timeout);
+    let token = self.timeout.arm(started + timeout);
     let run_console = Arc::clone(&console);
 
     let fut = vm_with!(self.vm => |ctx| {
@@ -667,20 +667,21 @@ impl Runtime {
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
     let outcome = match run_within(self.timeout.clock(), backstop, fut).await {
       Ok(r) => r.and_then(|inner| inner),
-      Err(_) => return self.finish_backstop(started, &console, timeout),
+      Err(_) => return self.finish_backstop(token, started, &console, timeout),
     };
-    self.finish(outcome, started, &console, timeout)
+    self.finish(token, outcome, started, &console, timeout)
   }
 
   /// Build the `Run` from an outcome, applying the poison rule.
   fn finish<T>(
     &self,
+    token: crate::limits::ArmToken,
     outcome: Result<T, ScriptError>,
     started: Instant,
     console: &ConsoleCapture,
     timeout: Duration,
   ) -> Run<T> {
-    self.timeout.disarm();
+    self.timeout.disarm(token);
     let duration_ms = elapsed_ms(started);
     let drained = console.drain();
     match outcome {
@@ -720,8 +721,14 @@ impl Runtime {
   /// chance to halt it. The future was dropped mid-flight -- half-driven
   /// promises may still reference VM state, so the run is always
   /// poisoned.
-  fn finish_backstop<T>(&self, started: Instant, console: &ConsoleCapture, timeout: Duration) -> Run<T> {
-    self.timeout.disarm();
+  fn finish_backstop<T>(
+    &self,
+    token: crate::limits::ArmToken,
+    started: Instant,
+    console: &ConsoleCapture,
+    timeout: Duration,
+  ) -> Run<T> {
+    self.timeout.disarm(token);
     self.poisoned.store(true, Ordering::Relaxed);
     let duration_ms = elapsed_ms(started);
     Run {
@@ -742,7 +749,12 @@ impl Runtime {
   /// level and `return <value>` surfaces as the result. `args` is never
   /// interpolated into the source. For an ES module (`import` /
   /// `export`, TypeScript) bundle it and use [`Self::eval_module`].
-  pub async fn eval_script(&self, source: &str, args: &[serde_json::Value], options: RunOptions) -> Run<serde_json::Value> {
+  pub async fn eval_script(
+    &self,
+    source: &str,
+    args: &[serde_json::Value],
+    options: RunOptions,
+  ) -> Run<serde_json::Value> {
     let source = source.to_string();
     let args = args.to_vec();
     let run = self

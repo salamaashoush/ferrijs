@@ -1378,14 +1378,25 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 /// Propagates the global writes.
 pub fn install(ctx: &Ctx<'_>, backend: Arc<dyn FetchBackend>) -> rquickjs::Result<()> {
   define_classes(ctx)?;
+  let f = function(ctx, backend)?;
+  ctx.globals().set("fetch", f)?;
+  Ok(())
+}
+
+/// A `fetch` function over `backend`, not installed anywhere: for a
+/// host handing a caller an attenuated capability rather than the
+/// global.
+///
+/// # Errors
+///
+/// Propagates the function creation.
+pub fn function<'js>(ctx: &Ctx<'js>, backend: Arc<dyn FetchBackend>) -> rquickjs::Result<rquickjs::Function<'js>> {
   // Forward into a generic fn so `Ctx`/`Value`/return share one `'js`
   // (an inline closure gives each arg its own lifetime and the returned
   // promise Value cannot be proven to outlive them).
-  let f = rquickjs::Function::new(ctx.clone(), move |ctx, input, init| {
+  rquickjs::Function::new(ctx.clone(), move |ctx, input, init| {
     do_fetch(ctx, input, init, backend.clone())
-  })?;
-  ctx.globals().set("fetch", f)?;
-  Ok(())
+  })
 }
 
 /// The realm's `fetch` as an [`crate::Extension`], over `backend`.
