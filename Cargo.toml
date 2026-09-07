@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT OR Apache-2.0"
+authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
+repository = "https://github.com/salamaashoush/ferrijs"
+homepage = "https://github.com/salamaashoush/ferrijs"
+readme = "README.md"
+keywords = ["javascript", "quickjs", "runtime", "sandbox", "embedded"]
+categories = ["development-tools", "web-programming"]
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+rust_2018_idioms = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+dbg_macro = "warn"
+
+[workspace.dependencies]
+ferrijs = { path = "crates/ferrijs", version = "0.1.0" }
+ferrijs-std = { path = "crates/ferrijs-std", version = "0.1.0" }
+ferrijs-fetch = { path = "crates/ferrijs-fetch", version = "0.1.0" }
+ferrijs-bundle = { path = "crates/ferrijs-bundle", version = "0.1.0" }
+# `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
+# !Send/!Sync and every cross-task dispatch closure (which must be
+# `Arc<dyn Fn + Send + Sync>`) fails to compile. `half` backs
+# `Float16Array` in the vendored byte helpers; `either` is what a JS
+# overload union lowers to; `bytes` lets a response body reach JS
+# without a `Vec` copy.
+rquickjs = { version = "0.12", features = [
+  "full-async",
+  "parallel",
+  "macro",
+  "loader",
+  "array-buffer",
+  "half",
+  "either",
+  "bytes",
+] }
+rquickjs-serde = "0.6"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.23"
+regex = "1"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+rustc-hash = "2"
+schemars = "1"
+url = "2"
+either = "1"
+flate2 = "1"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+subtle = "2"
+tempfile = "3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form", "gzip", "brotli", "deflate", "zstd"] }
+bytes = "1"
+mime = "0.3"
+percent-encoding = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 1
