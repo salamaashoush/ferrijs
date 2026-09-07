@@ -484,3 +484,12 @@ for.
 Until that changes, a suite that needs `Intl` supplies a JS polyfill
 through `[bundler.alias]`, which keeps the choice (and its weight) in
 the extension that needs it.
+
+33. **`crypto/subtle/digest.rs` — a synchronous validation failure is
+    kept.** Upstream validates the algorithm before returning the
+    future, so the exception is thrown while `subtle_digest` is still
+    returning `Ok(future)`; by the time the future runs, the pending
+    exception is gone and the promise rejects with an uninitialized
+    value (`typeof e === "unknown"`). The thrown value is now taken with
+    `ctx.catch()` at that point and re-thrown inside the future, where
+    the rejection is built. Upstream candidate.

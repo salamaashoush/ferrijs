@@ -470,6 +470,7 @@ impl Runtime {
     let (vm, vm_shutdown) = spawn_vm_loop(&ctx);
 
     let base_console = Arc::new(Self::console_capture(&config));
+    let install_console_capture = Arc::clone(&base_console);
     let install_registry = Arc::clone(&registry);
     let ud_vm = vm.clone();
     let permissions = Arc::clone(&config.permissions);
@@ -519,6 +520,12 @@ impl Runtime {
           .install_async(ctx.clone())
           .await
           .map_err(|e| ScriptError::internal(format!("extension `{}` failed to install: {e}", extension.name())))?;
+      }
+      // What an extension logged at its top level, when no sink is
+      // taking it live: forwarded to tracing rather than left in a
+      // buffer nothing drains.
+      for entry in install_console_capture.drain() {
+        tracing::info!(target: "ferrijs::extensions", "{}", entry.message);
       }
 
       crate::realm::lockdown(&ctx, &realm).map_err(|e| fail("the realm lockdown", e))?;

@@ -185,3 +185,26 @@ async fn node_crypto_module_hashes_and_random() {
   assert_eq!(v["randomIntInRange"], serde_json::Value::Bool(true));
   assert_eq!(v["uuidShape"], serde_json::Value::Bool(true));
 }
+
+/// A digest whose algorithm fails validation rejects with the
+/// `NotSupportedError` it names, not with an uninitialized value: the
+/// thrown exception is taken synchronously and re-thrown where the
+/// promise is built (a local delta in `subtle/digest.rs`).
+#[tokio::test]
+async fn an_unsupported_digest_rejects_with_a_real_error() {
+  let rt = Runtime::builder().build().await.expect("runtime");
+  let run = rt
+    .eval_script(
+      r"
+      try { await crypto.subtle.digest('NOPE', new Uint8Array(1)); return 'resolved'; }
+      catch (e) { return [typeof e, e.name]; }
+      ",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(
+    run.result.expect("run"),
+    serde_json::json!(["object", "NotSupportedError"])
+  );
+}

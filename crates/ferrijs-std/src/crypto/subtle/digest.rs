@@ -68,10 +68,22 @@ pub fn subtle_digest<'js>(
     data: ObjectBytes<'js>,
 ) -> impl Future<Output = Result<ArrayBuffer<'js>>> + 'js {
     // Snapshot inputs synchronously so mutating/detaching the buffer after the call can't affect the result (WPT digest.https.any.js).
-    let prepared = prepare_digest(&ctx, algorithm, data);
+    // LOCAL DELTA: a validation failure here throws while this function is
+    // still returning `Ok(future)`, so the pending exception is gone by the
+    // time the future runs and the promise rejects with an uninitialized
+    // value. Take the thrown value now and re-throw it inside the future,
+    // where the rejection is built.
+    let prepared = prepare_digest(&ctx, algorithm, data).map_err(|e| match e {
+        rquickjs::Error::Exception => Ok(ctx.catch()),
+        other => Err(other),
+    });
 
     async move {
-        let (algorithm, input) = prepared?;
+        let (algorithm, input) = match prepared {
+            Ok(p) => p,
+            Err(Ok(thrown)) => return Err(ctx.throw(thrown)),
+            Err(Err(e)) => return Err(e),
+        };
         let bytes = match algorithm {
             DigestAlgorithm::Fixed(hash) => digest(&hash, &input),
             DigestAlgorithm::Sha3_256 => Sha3_256::digest(&input).to_vec(),
