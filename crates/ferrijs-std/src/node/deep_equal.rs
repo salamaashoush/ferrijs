@@ -3,7 +3,7 @@
 //! One implementation, shared by `util.isDeepStrictEqual` and by
 //! `assert.deepEqual` / `assert.deepStrictEqual`.
 
-use rquickjs::{Function, Object, Type, Value, function::This};
+use rquickjs::{Atom, Function, Object, Type, Value, atom::PredefinedAtom, function::This};
 
 /// How leaf values compare.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,28 +159,38 @@ fn object_eq<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode, depth: usize) -> r
     return Ok(false);
   };
 
-  if mode == Mode::Strict && constructor_name(x)? != constructor_name(y)? {
+  // Each side's constructor name, once. It used to be recomputed six
+  // times per comparison -- here, and again inside the `Date` and
+  // `RegExp` probes for both operands -- and each call interned two
+  // atoms and allocated a String.
+  let (xc, yc) = (constructor_name(x)?, constructor_name(y)?);
+  if mode == Mode::Strict && xc != yc {
     return Ok(false);
   }
 
   // Dates and RegExps carry their state outside their own properties.
-  if let (Some(lhs), Some(rhs)) = (value_of_number(x)?, value_of_number(y)?) {
+  if xc.as_deref() == Some("Date") && yc.as_deref() == Some("Date") {
+    let (lhs, rhs) = (value_of_number(x)?, value_of_number(y)?);
     return Ok(lhs == rhs || (lhs.is_nan() && rhs.is_nan()));
   }
-  if let (Some(lhs), Some(rhs)) = (regexp_source(x)?, regexp_source(y)?) {
-    return Ok(lhs == rhs);
+  if xc.as_deref() == Some("RegExp") && yc.as_deref() == Some("RegExp") {
+    return Ok(regexp_source(x)? == regexp_source(y)?);
   }
 
-  let keys: Vec<String> = own_keys(x)?;
-  let other: Vec<String> = own_keys(y)?;
+  // Keys as atoms, not as `String`s. A property name that arrives as a
+  // Rust string has to be interned again for every lookup it is used
+  // in -- and this loop used it in three -- on top of the C-string
+  // round trip that built it.
+  let keys: Vec<Atom<'js>> = x.keys::<Atom<'js>>().collect::<rquickjs::Result<Vec<_>>>()?;
+  let other: Vec<Atom<'js>> = y.keys::<Atom<'js>>().collect::<rquickjs::Result<Vec<_>>>()?;
   if keys.len() != other.len() {
     return Ok(false);
   }
   for key in keys {
-    if !y.contains_key(key.as_str())? {
+    if !y.contains_key(key.clone())? {
       return Ok(false);
     }
-    let (lhs, rhs): (Value<'_>, Value<'_>) = (x.get(key.as_str())?, y.get(key.as_str())?);
+    let (lhs, rhs): (Value<'js>, Value<'js>) = (x.get(key.clone())?, y.get(key)?);
     if !equal_at(&lhs, &rhs, mode, depth + 1)? {
       return Ok(false);
     }
@@ -188,34 +198,25 @@ fn object_eq<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode, depth: usize) -> r
   Ok(true)
 }
 
-fn own_keys(object: &Object<'_>) -> rquickjs::Result<Vec<String>> {
-  object.keys::<String>().collect::<rquickjs::Result<Vec<String>>>()
-}
-
 fn constructor_name(object: &Object<'_>) -> rquickjs::Result<Option<String>> {
-  let ctor: Option<Object<'_>> = object.get("constructor").ok();
+  let ctor: Option<Object<'_>> = object.get(PredefinedAtom::Constructor).ok();
   match ctor {
-    Some(c) => Ok(c.get::<_, String>("name").ok()),
+    Some(c) => Ok(c.get::<_, String>(PredefinedAtom::Name).ok()),
     None => Ok(None),
   }
 }
 
-/// `valueOf()` for the wrappers whose identity is a number — `Date`, and the
-/// boxed primitives.
-fn value_of_number(object: &Object<'_>) -> rquickjs::Result<Option<f64>> {
-  if constructor_name(object)?.as_deref() != Some("Date") {
-    return Ok(None);
-  }
-  let value_of: Function<'_> = object.get("valueOf")?;
-  let millis: f64 = value_of.call((This(object.clone()),))?;
-  Ok(Some(millis))
+/// `valueOf()` for a `Date`, whose identity is a number rather than its
+/// own properties. The caller has already established the constructor.
+fn value_of_number(object: &Object<'_>) -> rquickjs::Result<f64> {
+  let value_of: Function<'_> = object.get(PredefinedAtom::ValueOf)?;
+  value_of.call((This(object.clone()),))
 }
 
-fn regexp_source(object: &Object<'_>) -> rquickjs::Result<Option<String>> {
-  if constructor_name(object)?.as_deref() != Some("RegExp") {
-    return Ok(None);
-  }
-  let source: String = object.get("source")?;
-  let flags: String = object.get("flags").unwrap_or_default();
-  Ok(Some(format!("/{source}/{flags}")))
+/// A `RegExp`'s pattern and flags, which is its whole identity. The
+/// caller has already established the constructor.
+fn regexp_source(object: &Object<'_>) -> rquickjs::Result<String> {
+  let source: String = object.get(PredefinedAtom::Source)?;
+  let flags: String = object.get(PredefinedAtom::Flags).unwrap_or_default();
+  Ok(format!("/{source}/{flags}"))
 }

@@ -232,6 +232,18 @@ async fn run(workload: String, iters: u64) {
              const o = { a: 1, b: 'two', c: [1, 2, 3], d: { e: true, f: null } }; let n = 0;
              for (let i = 0; i < 20000; i++) n += inspect(o).length; return n"
           },
+          "deep_equal" => {
+            "const assert = require('node:assert');
+             const a = { x: [1, 2, 3], y: { z: 'v' } }, b = { x: [1, 2, 3], y: { z: 'v' } }; let n = 0;
+             for (let i = 0; i < 20000; i++) { assert.deepStrictEqual(a, b); n++; } return n"
+          },
+          "buffer_from" => {
+            "let n = 0; for (let i = 0; i < 50000; i++) n += Buffer.from('hello world ' + (i & 255)).length; return n"
+          },
+          "path_parse" => {
+            "const { parse } = require('node:path'); let n = 0;
+             for (let i = 0; i < 50000; i++) n += parse('/home/user/file' + (i & 15) + '.txt').name.length; return n"
+          },
           "timers" => {
             "let n = 0; for (let i = 0; i < 2000; i++) await new Promise(r => setTimeout(() => { n++; r(); }, 0)); return n"
           },
