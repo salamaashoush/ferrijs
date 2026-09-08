@@ -48,7 +48,7 @@ fn resolve_view_bytes<'js>(
         .ok_or(ERROR_MSG_ARRAY_BUFFER_DETACHED)
         .or_throw(ctx)?;
 
-    if byte_offset > raw.len || byte_length > raw.len - byte_offset {
+    if byte_offset > raw.len() || byte_length > raw.len() - byte_offset {
         return Err(Exception::throw_range(
             ctx,
             "The value of \"byteOffset\" is out of range",
@@ -56,7 +56,7 @@ fn resolve_view_bytes<'js>(
     }
 
     // SAFETY: bounds checked above.
-    Ok(unsafe { slice::from_raw_parts_mut(raw.ptr.as_ptr().add(byte_offset), byte_length) })
+    Ok(unsafe { slice::from_raw_parts_mut(raw.cast::<u8>().as_ptr().add(byte_offset), byte_length) })
 }
 
 impl<'js> IntoJs<'js> for Buffer {
@@ -245,7 +245,12 @@ fn concat<'js>(ctx: Ctx<'js>, list: Array<'js>, max_length: Opt<usize>) -> Resul
     let mut length;
     for value in list.iter::<Object>() {
         let typed_array = TypedArray::<u8>::from_object(value?)?;
-        let bytes_ref: &[u8] = typed_array.as_ref();
+        // SAFETY: 0.13 requires that no JS run while the slice is alive.
+        // `bytes_ref` is copied into `bytes` and dropped before the loop
+        // advances the iterator, which is the only thing here that can
+        // re-enter JS. A detached buffer reads as empty and is skipped
+        // by the `length == 0` arm below.
+        let bytes_ref: &[u8] = unsafe { typed_array.as_bytes() }.unwrap_or_default();
 
         length = bytes_ref.len();
 
@@ -437,7 +442,10 @@ fn to_string(
     end: Opt<i32>,
 ) -> Result<String> {
     let typed_array = TypedArray::<u8>::from_object(this.0)?;
-    let bytes: &[u8] = typed_array.as_ref();
+    // SAFETY: nothing between here and the last use of `bytes` runs JS --
+    // the slicing is arithmetic and the encoder is pure Rust. `or_throw`
+    // raises an exception rather than calling back into script.
+    let bytes: &[u8] = unsafe { typed_array.as_bytes() }.unwrap_or_default();
 
     let start = start
         .0

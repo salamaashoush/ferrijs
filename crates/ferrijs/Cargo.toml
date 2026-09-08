@@ -35,7 +35,7 @@ ferrijs-permissions = { workspace = true }
 ferrijs-fetch = { workspace = true, optional = true }
 rquickjs = { workspace = true }
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
-rquickjs-serde = { workspace = true }
+ferrijs-serde = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

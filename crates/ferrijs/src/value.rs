@@ -76,16 +76,16 @@ pub fn parse_timeout_number_or_bag<'js>(
 }
 
 /// Convert any `serde::Serialize` value into a JS value via
-/// `rquickjs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
+/// `ferrijs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
 /// and no `serde_json::Value` middle allocation. Used for binding
 /// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  rquickjs_serde::to_value(ctx.clone(), value)
+  ferrijs_serde::to_value(ctx.clone(), value)
     .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
 }
 
 /// Build a JS `Array<{ name, value }>` straight from name/value pairs
-/// via `rquickjs-serde` — no `serde_json::json!` / `serde_json::Value`
+/// via `ferrijs-serde` — no `serde_json::json!` / `serde_json::Value`
 /// middle allocation. Used by `request`/`response`/`apiResponse`
 /// `headersArray()`.
 pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
@@ -105,13 +105,13 @@ pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S
 }
 
 /// Inverse of [`serde_to_js`] — deserialize a JS value into a Rust type
-/// via `rquickjs-serde` (direct `Value` -> `T`). Integral-float ->
+/// via `ferrijs-serde` (direct `Value` -> `T`). Integral-float ->
 /// integer coercion, `undefined`/function-property drop, Proxy and
-/// cycle handling all hold (covered by the rquickjs-serde test suite),
+/// cycle handling all hold (covered by the ferrijs-serde test suite),
 /// so the option-bag call sites keep their prior semantics without our
 /// own hand-rolled walker.
 pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  rquickjs_serde::from_value(value)
+  ferrijs_serde::from_value(value)
     .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
 
@@ -212,7 +212,7 @@ fn f64_as_exact_i32(n: f64) -> Option<i32> {
 
 /// Convert a script's value to `serde_json::Value`.
 ///
-/// `rquickjs-serde` drives the deserializer: it invokes `toJSON()` /
+/// `ferrijs-serde` drives the deserializer: it invokes `toJSON()` /
 /// `valueOf()` (a returned `Date` still serialises as its ISO string),
 /// coerces whole f64 in the safe-integer range to `i64`, drops
 /// `undefined` / function / symbol, and renders non-finite as null. The
@@ -224,7 +224,7 @@ fn f64_as_exact_i32(n: f64) -> Option<i32> {
 /// array result would collapse to `null`.
 #[must_use]
 pub fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  rquickjs_serde::from_value::<JsonInter>(value)
+  ferrijs_serde::from_value::<JsonInter>(value)
     .ok()
     .map(JsonInter::into_json)
 }

@@ -152,9 +152,9 @@ url = { version = "2", features = ["std"], default-features = false }
 flate2 = "1"
 # `zlib`'s brotli and zstd codecs, via the vendored `llrt_compression`.
 # Optional so the feature arms upstream wrote compile out unchanged.
-brotli = { version = "8", features = ["std"], default-features = false, optional = true }
+brotli = { version = "9", features = ["std"], default-features = false, optional = true }
 brotlic = { version = "0.8", default-features = false, optional = true }
-zstd = { version = "0.13", default-features = false, optional = true }
+zstd = { version = "0.14", default-features = false, optional = true }
 # `urlToHttpOptions` decodes the credentials the way `decodeURIComponent`
 # does; `url` keeps this crate private rather than re-exporting it.
 percent-encoding = { version = "2", default-features = false, features = ["std"] }

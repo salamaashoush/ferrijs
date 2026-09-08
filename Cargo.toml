@@ -41,13 +41,14 @@ ferrijs-std = { path = "crates/ferrijs-std", version = "0.1.0" }
 ferrijs-fetch = { path = "crates/ferrijs-fetch", version = "0.1.0" }
 ferrijs-permissions = { path = "crates/ferrijs-permissions", version = "0.1.0" }
 ferrijs-bundle = { path = "crates/ferrijs-bundle", version = "0.1.0" }
+ferrijs-serde = { path = "crates/ferrijs-serde", version = "0.1.0" }
 # `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
 # !Send/!Sync and every cross-task dispatch closure (which must be
 # `Arc<dyn Fn + Send + Sync>`) fails to compile. `half` backs
 # `Float16Array` in the vendored byte helpers; `either` is what a JS
 # overload union lowers to; `bytes` lets a response body reach JS
 # without a `Vec` copy.
-rquickjs = { version = "0.12", features = [
+rquickjs = { version = "0.13", features = [
   "full-async",
   "parallel",
   "macro",
@@ -57,7 +58,6 @@ rquickjs = { version = "0.12", features = [
   "either",
   "bytes",
 ] }
-rquickjs-serde = "0.6"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

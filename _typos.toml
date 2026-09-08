@@ -12,4 +12,6 @@ extend-exclude = [
   # Vendored llrt, kept byte-close to upstream so a re-sync stays a
   # readable diff. Its spelling is upstream's business.
   "crates/ferrijs-std/",
+  # Vendored rquickjs-serde, for the same reason.
+  "crates/ferrijs-serde/src/",
 ]

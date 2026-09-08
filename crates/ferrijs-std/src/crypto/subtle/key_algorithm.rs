@@ -1152,8 +1152,9 @@ fn from_rsa<'js>(
                 let modulus_length = enforce_range_u32(ctx, value, "modulusLength")?;
                 let public_exponent: TypedArray<u8> =
                     obj.get_required("publicExponent", "algorithm")?;
-                let public_exponent = public_exponent
-                    .as_bytes()
+                // SAFETY: `to_owned` below copies it out; nothing between
+                // runs JS.
+                let public_exponent = unsafe { public_exponent.as_bytes() }
                     .ok_or_else(|| {
                         DOMException::not_supported_error(ctx, "Array buffer has been detached")
                     })?

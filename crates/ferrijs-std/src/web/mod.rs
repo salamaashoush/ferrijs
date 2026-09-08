@@ -170,11 +170,13 @@ fn clone_value<'js>(
     return ctor.construct::<_, Value<'js>>((source, flags));
   }
   if let Some(buf) = rquickjs::ArrayBuffer::from_object(obj.clone()) {
-    let bytes = buf.as_bytes().unwrap_or_default().to_vec();
+    // SAFETY: copied out immediately; nothing runs JS in between.
+    let bytes = unsafe { buf.as_bytes() }.unwrap_or_default().to_vec();
     return Ok(rquickjs::ArrayBuffer::new(ctx.clone(), bytes)?.into_value());
   }
   if let Ok(ta) = TypedArray::<u8>::from_value(value.clone()) {
-    let bytes = ta.as_bytes().unwrap_or_default().to_vec();
+    // SAFETY: copied out immediately; nothing runs JS in between.
+    let bytes = unsafe { ta.as_bytes() }.unwrap_or_default().to_vec();
     return Ok(TypedArray::new(ctx.clone(), bytes)?.into_value());
   }
 

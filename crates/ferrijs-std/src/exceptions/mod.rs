@@ -422,12 +422,21 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
 }
 
 // https://tc39.es/proposal-error-stack-accessor/ moves `stack` to an accessor
-// on `Error.prototype`, so DOMException inherits it instead of exposing its own.
-// QuickJS still gives plain Error instances an own `stack` data property, which
-// shadows this accessor, so the getter only runs for DOMException instances.
+// on `Error.prototype`, and the engine behind rquickjs 0.13 implements it:
+// `Error.prototype.stack` is already a getter and instances carry no own
+// `stack` to shadow it.
+//
+// So the accessor goes on `DOMException.prototype`, not on `Error.prototype`.
+// Defining it upstream would replace the engine's getter rather than be
+// shadowed by it, and every ordinary error would report an empty stack --
+// which is exactly what happened when this crate first moved to 0.13.
+// Capturing the engine's getter to delegate to is not an option either: a
+// native closure holding a JS value is a cycle the collector cannot see,
+// and the runtime aborts at teardown with the function still alive.
 fn define_error_stack_accessor<'js>(ctx: &Ctx<'js>) -> Result<()> {
-    let prototype_error = BasePrimordials::get(ctx)?.prototype_error.clone();
-    prototype_error.prop(
+    let dom_ex_proto = Class::<DOMException>::prototype(ctx)?
+        .expect("DOMException prototype is defined by the call above");
+    dom_ex_proto.prop(
         PredefinedAtom::Stack,
         Accessor::new(
             |this: This<Value<'js>>| -> Result<String> {
@@ -442,8 +451,10 @@ fn define_error_stack_accessor<'js>(ctx: &Ctx<'js>) -> Result<()> {
                 let Some(obj) = this.0.as_object() else {
                     return Ok(());
                 };
-                if *obj == BasePrimordials::get(&ctx)?.prototype_error {
-                    return Ok(());
+                if let Ok(Some(home)) = Class::<DOMException>::prototype(&ctx) {
+                    if *obj == home {
+                        return Ok(());
+                    }
                 }
                 obj.prop(
                     PredefinedAtom::Stack,

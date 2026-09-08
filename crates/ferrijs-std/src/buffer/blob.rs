@@ -286,8 +286,12 @@ impl<'js> Blob<'js> {
 
     /// Borrow the underlying bytes directly. Returns `&[]` if the ArrayBuffer
     /// has been detached (shouldn't happen in normal blob flow).
+    /// The borrow carries rquickjs 0.13's obligation to its caller: the
+    /// slice aliases engine memory, so no JavaScript may run while it
+    /// is alive.
     pub fn as_bytes(&self) -> &[u8] {
-        self.data.as_bytes().unwrap_or(&[])
+        // SAFETY: see the note above -- forwarded via the borrow.
+        unsafe { self.data.as_bytes() }.unwrap_or(&[])
     }
 }
 
@@ -339,7 +343,9 @@ where
                 continue;
             }
             if let Some(x) = ArrayBuffer::from_object(object.clone()) {
-                data.extend_from_slice(x.as_bytes().ok_or_else(|| {
+                // SAFETY: copied by `extend_from_slice` before anything
+                // can re-enter script.
+                data.extend_from_slice(unsafe { x.as_bytes() }.ok_or_else(|| {
                     Exception::throw_type(ctx, "Cannot create a blob with detached buffer")
                 })?);
                 continue;

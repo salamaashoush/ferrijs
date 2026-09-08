@@ -355,7 +355,13 @@ impl<'js> ObjectBytes<'js> {
         self.as_bytes_inner().ok()
     }
 
+    /// The obligation rquickjs 0.13 attaches to `as_bytes` is forwarded
+    /// to the caller by the returned borrow: the slice aliases engine
+    /// memory, so no JavaScript may run while it is alive. Every caller
+    /// in this crate copies out of it before returning to script.
     fn as_bytes_inner(&self) -> std::result::Result<&[u8], Rc<str>> {
+        // SAFETY: see the note above -- the borrow carries the contract.
+        unsafe {
         match self {
             ObjectBytes::U8Array(array) => array.as_bytes(),
             ObjectBytes::I8Array(array) => array.as_bytes(),
@@ -374,6 +380,7 @@ impl<'js> ObjectBytes<'js> {
                 bytes.get(*offset..end)
             }),
             ObjectBytes::Vec(bytes) => Some(bytes.as_ref()),
+        }
         }
         .ok_or(ERROR_MSG_ARRAY_BUFFER_DETACHED.into())
     }

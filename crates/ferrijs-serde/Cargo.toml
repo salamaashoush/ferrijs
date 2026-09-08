@@ -1,0 +1,28 @@
+[package]
+name = "ferrijs-serde"
+description = "Serde support for the ferrijs QuickJS runtime: a Serializer and Deserializer over `rquickjs::Value` (vendored from rquickjs-serde, Apache-2.0)."
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+authors = [
+  "Emile Fugulin <code@efugulin.com>",
+  "The Javy Project Developers",
+  "Salama Ashoush <salamaashoush@gmail.com>",
+]
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+# Deliberately NOT `workspace = true`: this crate is vendored third-party
+# code kept close to upstream so it can be re-synced, exactly as
+# `ferrijs-std` is. Reformatting it to the house style would make every
+# future diff against rquickjs-serde unreadable.
+[lints.rust]
+unsafe_code = "allow"
+
+[dependencies]
+rquickjs = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+quickcheck = "1"
