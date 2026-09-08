@@ -18,8 +18,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-ferrijs = { path = "../ferrijs", version = "0.1.0" }
-ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.1.0" }
+ferrijs = { path = "../ferrijs", version = "0.2.0" }
+ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.2.0" }
 ferrijs-permissions = { workspace = true }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 tokio = { workspace = true }
