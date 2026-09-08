@@ -50,6 +50,6 @@ pub fn get_user_info<'js>(ctx: Ctx<'js>, _options: Opt<Value<'js>>) -> Result<Ob
         std::env::var("USERNAME").unwrap_or_default().into_js(&ctx)?,
     )?;
     obj.set("shell", Null.into_js(&ctx)?)?;
-    obj.set("homedir", get_home_dir())?;
+    obj.set("homedir", get_home_dir(ctx.clone()))?;
     Ok(obj)
 }

@@ -1181,7 +1181,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ferrijs"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "ferrijs-fetch",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-bundle"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "ferrijs",
  "rolldown",
@@ -1221,7 +1221,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "ferrijs",
@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "quickcheck",
  "rquickjs",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1298,6 +1298,7 @@ dependencies = [
  "hmac",
  "home",
  "itoa",
+ "junction",
  "keccak",
  "libc",
  "md-5",
@@ -2074,6 +2075,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01ed659c5f428031b9c1fb7de6729af2eb491654d4bcd416a5b5b704986b9658"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "junction"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "160f2eade097f30263b548aae5deb12ad349c909baa710fa24b92c9090b2e006"
+dependencies = [
+ "scopeguard",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
