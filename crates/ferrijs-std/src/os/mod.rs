@@ -25,6 +25,14 @@ use self::unix::{
 #[cfg(unix)]
 mod unix;
 
+#[cfg(windows)]
+use self::windows::{
+    get_priority, get_release, get_type, get_user_info, get_version, set_priority, DEV_NULL, EOL,
+};
+
+#[cfg(windows)]
+mod windows;
+
 #[cfg(feature = "network")]
 use self::network::get_network_interfaces;
 #[cfg(feature = "statistics")]

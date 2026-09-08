@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 # The floor the workspace is actually verified on, which is also the
 # channel `rust-toolchain.toml` pins and the number `clippy.toml` reads.
@@ -36,12 +36,12 @@ todo = "warn"
 dbg_macro = "warn"
 
 [workspace.dependencies]
-ferrijs = { path = "crates/ferrijs", version = "0.2.1" }
-ferrijs-std = { path = "crates/ferrijs-std", version = "0.2.1" }
-ferrijs-fetch = { path = "crates/ferrijs-fetch", version = "0.2.1" }
-ferrijs-permissions = { path = "crates/ferrijs-permissions", version = "0.2.1" }
-ferrijs-bundle = { path = "crates/ferrijs-bundle", version = "0.2.1" }
-ferrijs-serde = { path = "crates/ferrijs-serde", version = "0.2.1" }
+ferrijs = { path = "crates/ferrijs", version = "0.2.2" }
+ferrijs-std = { path = "crates/ferrijs-std", version = "0.2.2" }
+ferrijs-fetch = { path = "crates/ferrijs-fetch", version = "0.2.2" }
+ferrijs-permissions = { path = "crates/ferrijs-permissions", version = "0.2.2" }
+ferrijs-bundle = { path = "crates/ferrijs-bundle", version = "0.2.2" }
+ferrijs-serde = { path = "crates/ferrijs-serde", version = "0.2.2" }
 # `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
 # !Send/!Sync and every cross-task dispatch closure (which must be
 # `Arc<dyn Fn + Send + Sync>`) fails to compile. `half` backs
