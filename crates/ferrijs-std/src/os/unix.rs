@@ -79,7 +79,10 @@ fn passwd_entry(uid: libc::uid_t) -> Option<(String, String)> {
     let mut size = if hint > 0 { hint as usize } else { 1024 };
 
     loop {
-        let mut buf = vec![0_i8; size];
+        // `c_char` is signed on x86_64 and on Apple targets but unsigned
+        // on aarch64-linux, so a `[i8]` here fails to build for exactly
+        // one of the targets the CLI ships.
+        let mut buf = vec![0 as libc::c_char; size];
         let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut result: *mut libc::passwd = std::ptr::null_mut();
         // SAFETY: `passwd` and `result` are valid out-pointers and `buf` is
