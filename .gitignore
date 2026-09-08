@@ -1,5 +1,10 @@
 /target
 **/target/
+# `just patch` materialises the engine source here from the crate cargo
+# already downloaded, and writes the override that points at it. Only
+# the diffs in `patches/` are committed.
+/vendor
+/.cargo/config.toml
 node_modules/
 .DS_Store
 .claude/

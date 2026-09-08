@@ -10,7 +10,10 @@ them, and the policy they run under), adds its own API as `Extension`s,
 and runs scripts, compiled modules, or bodies of its own under the same
 bracket. Two hosts consume it: ferridriver (browser automation, sibling
 checkout `../ferridriver`) and ferrimock (a mock server, `../ferrimock`),
-both by path dependency while the three move together.
+both by VERSION from crates.io. Nothing that only works inside this
+workspace reaches them: a `[patch.crates-io]` or a `.cargo/config.toml`
+`paths` override is local to whoever builds it, so a fix to a dependency
+has to go upstream or be published to land for them.
 
 ## Crates
 

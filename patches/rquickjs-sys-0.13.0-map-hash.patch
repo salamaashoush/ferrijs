@@ -1,0 +1,29 @@
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -53337,7 +53337,11 @@
+         break;
+     case JS_TAG_OBJECT:
+     case JS_TAG_SYMBOL:
+-        h = (uintptr_t)JS_VALUE_GET_PTR(key) * 3163;
++        /* Same masking problem as the float case: an allocator hands
++           out 16-byte-aligned pointers, so multiplying by an odd
++           constant leaves four zero low bits and only every sixteenth
++           bucket was ever used. */
++        h = (uint32_t)((((uint64_t)(uintptr_t)JS_VALUE_GET_PTR(key)) * (uint64_t)0x9E3779B97F4A7C15ull) >> 32);
+         break;
+     case JS_TAG_INT:
+         d = JS_VALUE_GET_INT(key);
+@@ -53356,7 +53360,12 @@
+             d = NAN;
+     hash_float64:
+         u.d = d;
+-        h = (u.u32[0] ^ u.u32[1]) * 3163;
++        /* The bucket index is the LOW bits of h. A double holding a
++           small integer has a zero low word and a high word whose own
++           low bits are zero, so (lo ^ hi) * odd left every such key in
++           bucket 0 and made Map/Set with numeric keys a linked list.
++           Mix so the entropy reaches the bits the mask reads. */
++        h = (uint32_t)(((u.u64 ^ (u.u64 >> 32)) * (uint64_t)0x9E3779B97F4A7C15ull) >> 32);
+         tag = JS_TAG_FLOAT64;
+         break;
+     default:
