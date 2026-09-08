@@ -283,6 +283,10 @@ fn main() -> ExitCode {
     }
   };
   stamp("main entered");
+  // Nothing to fall back to: without an executor there is no realm to
+  // run anything in, and reporting it as a script failure would be a
+  // lie about whose fault it was.
+  #[allow(clippy::expect_used)]
   let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
   stamp("tokio runtime built");
   let code = rt.block_on(async_main(&stamp));

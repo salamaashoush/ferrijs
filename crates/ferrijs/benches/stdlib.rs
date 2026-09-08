@@ -3,7 +3,21 @@
 //! run bracket is noise, so the number is the binding's own cost --
 //! argument conversion, the permission check, and the work itself.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+// Benchmarks and the profiling driver are not API. The pedantic
+// documentation and `must_use` lints have nothing to protect here, and
+// a panic is how a broken measurement is meant to stop.
+#![allow(
+  // `support` is shared by four bench binaries, each using a subset.
+  dead_code,
+  clippy::cast_precision_loss,
+  clippy::expect_used,
+  clippy::unwrap_used,
+  clippy::missing_panics_doc,
+  clippy::must_use_candidate,
+  clippy::semicolon_if_nothing_returned,
+  clippy::too_many_lines,
+  clippy::doc_markdown
+)]
 
 mod support;
 

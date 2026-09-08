@@ -947,22 +947,21 @@ pub async fn script_body(
   args: &[serde_json::Value],
 ) -> Result<serde_json::Value, ScriptError> {
   install_args(ctx, args)?;
-  let body = match crate::script_cache::get(ctx, source) {
-    Some(f) => f,
-    None => {
-      // One line of wrapper before the user's source, so a reported
-      // position is offset by one. The arrow is compiled but not
-      // called, so the same function serves every later run.
-      let mut wrapped = String::with_capacity(source.len() + 24);
-      wrapped.push_str("(async () => {\n");
-      wrapped.push_str(source);
-      wrapped.push_str("\n})");
-      let f: rquickjs::Function<'_> = ctx
-        .eval(wrapped.as_bytes())
-        .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
-      crate::script_cache::put(ctx, source, &f);
-      f
-    },
+  let body = if let Some(f) = crate::script_cache::get(ctx, source) {
+    f
+  } else {
+    // One line of wrapper before the user's source, so a reported
+    // position is offset by one. The arrow is compiled but not called,
+    // so the same function serves every later run.
+    let mut wrapped = String::with_capacity(source.len() + 24);
+    wrapped.push_str("(async () => {\n");
+    wrapped.push_str(source);
+    wrapped.push_str("\n})");
+    let f: rquickjs::Function<'_> = ctx
+      .eval(wrapped.as_bytes())
+      .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+    crate::script_cache::put(ctx, source, &f);
+    f
   };
   let promise: rquickjs::Promise<'_> = body
     .call(())
