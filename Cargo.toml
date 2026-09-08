@@ -48,6 +48,12 @@ ferrijs-serde = { path = "crates/ferrijs-serde", version = "0.2.3" }
 # `Float16Array` in the vendored byte helpers; `either` is what a JS
 # overload union lowers to; `bytes` lets a response body reach JS
 # without a `Vec` copy.
+# `full-async` does NOT imply `parallel` (see below). `allocator` opens
+# `AsyncRuntime::new_with_alloc`, which is how the engine is pointed at
+# mimalloc instead of the platform malloc. `disable-assertions` defines
+# `NDEBUG` for the vendored quickjs-ng build: without it every
+# `assert()` in the interpreter's hot paths is live in a release
+# artifact, which is not how upstream ships it.
 rquickjs = { version = "0.13", features = [
   "full-async",
   "parallel",
@@ -57,7 +63,10 @@ rquickjs = { version = "0.13", features = [
   "half",
   "either",
   "bytes",
+  "allocator",
+  "disable-assertions",
 ] }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -82,15 +91,24 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "mul
 bytes = "1"
 mime = "0.3"
 percent-encoding = "2"
+criterion = { version = "0.8", default-features = false, features = ["async_tokio", "cargo_bench_support", "rayon"] }
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+# Benchmarks and profiling runs are built exactly like a release
+# artifact (LTO, one codegen unit) but keep the frame pointers and
+# symbols a sampling profiler needs to attribute a stack.
+[profile.bench]
+inherits = "release"
+debug = 1
+strip = "none"
 
 [profile.dev]
 debug = false
 
 [profile.dev.package."*"]
 opt-level = 1
+

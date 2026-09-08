@@ -34,6 +34,7 @@ ferrijs-std = { workspace = true }
 ferrijs-permissions = { workspace = true }
 ferrijs-fetch = { workspace = true, optional = true }
 rquickjs = { workspace = true }
+libmimalloc-sys = { workspace = true }
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).
 ferrijs-serde = { workspace = true }
 tokio = { workspace = true }
@@ -50,3 +51,20 @@ sourcemap = "9"
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "runtime"
+harness = false
+
+[[bench]]
+name = "js"
+harness = false
+
+[[bench]]
+name = "stdlib"
+harness = false
+
+[[bench]]
+name = "convert"
+harness = false
