@@ -11,6 +11,18 @@
 //! executor-owned-future shape (same as `AbortSignal.timeout`) — the
 //! future is dropped with the runtime, never stored in a traced JS field.
 //!
+//! The delay follows the HTML spec rather than Node. A `setTimeout(fn,
+//! 0)` runs on the next turn of the event loop, after the microtask
+//! checkpoint, instead of waiting out Node's unconditional one
+//! millisecond -- for a script that polls with `await sleep(0)` that is
+//! the difference between microseconds and milliseconds per turn. What
+//! keeps that from starving the loop is the spec's own guard, the timer
+//! NESTING LEVEL: a timeout armed from inside a timer callback is one
+//! level deeper than the callback's own, and past level five a delay
+//! under 4ms is raised to 4ms. `setInterval` deepens a level per
+//! repeat, so a zero-delay interval free-runs a few times and then
+//! settles at 4ms, which is what a browser does.
+//!
 //! A host with ambient per-callback state (a capability grant, a request
 //! scope) supplies it as a [`CallbackPolicy`]: it is captured when the
 //! timer is armed and re-entered when the callback fires, so a callback
@@ -19,11 +31,43 @@
 //! install [`NoPolicy`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use rquickjs::function::{Func, Rest};
 use rquickjs::{Class, Ctx, Function, JsLifetime, Value, class::Trace};
 use tokio::sync::Notify;
+
+/// Past this nesting depth the HTML spec raises a sub-4ms delay to 4ms.
+/// It is what stops `setTimeout(f, 0)` recursion from spinning the loop
+/// now that the first level really does fire on the next turn.
+const MAX_FREE_NESTING: u32 = 5;
+
+/// The HTML timer nesting level currently in force: zero outside any
+/// timer callback, and the firing timer's own level inside one.
+///
+/// Kept as realm userdata rather than captured by the arming closures,
+/// because `setTimeout` has to be a named generic function: an inline
+/// closure gives `Ctx`, the callback and the returned handle three
+/// separate `'js` lifetimes, and the handle is invariant over its own.
+#[derive(Clone)]
+struct Nesting(Arc<AtomicU32>);
+
+// SAFETY: owns only an `Arc<AtomicU32>`; no borrowed JS values, so
+// restating the unused `'js` lifetime is sound.
+#[allow(unsafe_code)]
+unsafe impl JsLifetime<'_> for Nesting {
+  type Changed<'to> = Nesting;
+}
+
+/// The realm's nesting counter, or a detached one for a realm whose
+/// host installed timers without it (the level then never deepens,
+/// which is the pre-existing behaviour rather than a new hazard).
+fn nesting_of(ctx: &Ctx<'_>) -> Arc<AtomicU32> {
+  ctx
+    .userdata::<Nesting>()
+    .map_or_else(|| Arc::new(AtomicU32::new(0)), |n| Arc::clone(&n.0))
+}
 
 /// Ambient host state that a scheduled callback must run under.
 pub trait CallbackPolicy: Clone + 'static {
@@ -72,6 +116,40 @@ fn clear_timeout(value: Rest<Value<'_>>) {
   }
 }
 
+/// The delay a script asked for, in whole milliseconds. A negative,
+/// NaN or out-of-range value is zero, which the spec treats as "as soon
+/// as the loop gets to it".
+fn requested_ms(msec: Option<f64>) -> u64 {
+  match msec {
+    Some(ms) if ms.is_finite() && ms >= 1.0 && ms < f64::from(i32::MAX) => ms as u64,
+    _ => 0,
+  }
+}
+
+/// The spec's clamp: past [`MAX_FREE_NESTING`], anything under 4ms
+/// becomes 4ms.
+fn clamped(requested: u64, level: u32) -> Duration {
+  if level > MAX_FREE_NESTING && requested < 4 {
+    Duration::from_millis(4)
+  } else {
+    Duration::from_millis(requested)
+  }
+}
+
+/// Wait out `delay`. A zero delay is not a timer at all: yielding hands
+/// the loop back so the microtask checkpoint runs first (a `setTimeout`
+/// is a task, and a task never precedes a promise continuation already
+/// queued), and the callback fires on the next pass. Going through
+/// tokio's wheel instead would cost the millisecond this whole change
+/// exists to remove.
+async fn wait(delay: Duration) {
+  if delay.is_zero() {
+    tokio::task::yield_now().await;
+  } else {
+    tokio::time::sleep(delay).await;
+  }
+}
+
 fn set_timeout_interval<'js, P: CallbackPolicy>(
   ctx: Ctx<'js>,
   cb: Function<'js>,
@@ -79,44 +157,65 @@ fn set_timeout_interval<'js, P: CallbackPolicy>(
   args: Vec<Value<'js>>,
   is_interval: bool,
 ) -> rquickjs::Result<Class<'js, Timeout>> {
-  // 4ms floor, matching the HTML spec's nested-timeout clamp. Node
-  // clamps NaN/negative and >2^31-1 delays to 1ms — treat all of those
-  // as the floor.
-  let msecs = match msec {
-    Some(ms) if ms.is_finite() && ms >= 0.0 && ms < f64::from(i32::MAX) => ms as u64,
-    _ => 0,
-  };
-  let duration = Duration::from_millis(msecs.max(4));
+  let requested = requested_ms(msec);
+  let nesting = nesting_of(&ctx);
+  // A timer armed inside a callback is one level below it.
+  let level = nesting.load(Ordering::Relaxed).saturating_add(1);
 
   let abort = Arc::new(Notify::new());
   let abort_ref = abort.clone();
   let policy = P::capture(&ctx);
 
   ctx.spawn(async move {
+    // Node passes `setTimeout(cb, ms, ...args)` extras through to every
+    // invocation. Answers whether the timer should keep running. The
+    // nesting level is published for the duration of the call, so a
+    // timer the callback arms sees itself as one level deeper, and is
+    // restored afterwards even when the callback throws.
+    let fire = |level: u32| {
+      let mut call_args = rquickjs::function::Args::new(cb.ctx().clone(), args.len());
+      if call_args.push_args(args.iter().cloned()).is_err() {
+        return false;
+      }
+      let outer = nesting.swap(level, Ordering::Relaxed);
+      let res: rquickjs::Result<()> = P::enter(cb.ctx(), policy.as_ref(), || cb.call_arg(call_args));
+      nesting.store(outer, Ordering::Relaxed);
+      res
+        .inspect_err(|err| tracing::warn!(target: "ferrijs::timers", "timer callback threw: {err}"))
+        .is_ok()
+    };
+
+    if !is_interval {
+      tokio::select! {
+        () = abort_ref.notified() => {},
+        () = wait(clamped(requested, level)) => { fire(level); },
+      }
+      return;
+    }
+
+    // An interval deepens a level per repeat, so its delay is recomputed
+    // each time round rather than fixed at arm time. The deadline is
+    // carried forward instead of restarted after the callback, so the
+    // period does not drift by however long the callback took; a
+    // callback that overruns its own period skips the ticks it missed
+    // rather than firing them back to back.
+    let mut level = level;
+    let mut next = tokio::time::Instant::now() + clamped(requested, level);
     loop {
-      let mut interval = tokio::time::interval(duration);
-      interval.tick().await; // Skip the immediate first tick.
+      let delay = next.saturating_duration_since(tokio::time::Instant::now());
       let aborted = tokio::select! {
         () = abort_ref.notified() => true,
-        _ = interval.tick() => false,
+        () = wait(delay) => false,
       };
-      if aborted {
+      if aborted || !fire(level) {
         break;
       }
-      // Node passes `setTimeout(cb, ms, ...args)` extras through to
-      // every invocation.
-      let mut call_args = rquickjs::function::Args::new(cb.ctx().clone(), args.len());
-      let ok = call_args.push_args(args.iter().cloned()).is_ok();
-      if !ok || {
-        let res: rquickjs::Result<()> = P::enter(cb.ctx(), policy.as_ref(), || cb.call_arg(call_args));
-        res
-          .inspect_err(|err| tracing::warn!(target: "ferrijs::timers", "timer callback threw: {err}"))
-          .is_err()
-      } {
-        break;
-      }
-      if !is_interval {
-        break;
+      level = level.saturating_add(1);
+      let period = clamped(requested, level);
+      next += period;
+      let now = tokio::time::Instant::now();
+      if next <= now {
+        next = now + period;
       }
     }
   });
@@ -220,6 +319,9 @@ fn queue_microtask<'js, P: CallbackPolicy>(ctx: Ctx<'js>, cb: Function<'js>) -> 
 /// Propagates the global writes.
 pub fn install<P: CallbackPolicy>(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let globals = ctx.globals();
+  // One nesting counter per realm, shared by both arming functions:
+  // a `setInterval` armed inside a `setTimeout` callback is nested too.
+  let _ = ctx.store_userdata(Nesting(Arc::new(AtomicU32::new(0))));
   globals.set("setTimeout", Func::from(set_timeout::<P>))?;
   globals.set("clearTimeout", Func::from(clear_timeout))?;
   globals.set("setInterval", Func::from(set_interval::<P>))?;

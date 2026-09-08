@@ -122,6 +122,9 @@ pub fn install(ctx: &Ctx<'_>, options: &ProcessOptions) -> rquickjs::Result<()> 
   p.set("pid", i64::from(std::process::id()))?;
 
   // cwd(): the sandbox root, never the real process cwd (no path leak).
+  // `node:path` reads the same value straight from the realm rather
+  // than calling back through here on every `resolve`.
+  crate::node::path::set_cwd(ctx, &options.cwd);
   let root = options.cwd.clone();
   p.set("cwd", Func::from(move || root.clone()))?;
 

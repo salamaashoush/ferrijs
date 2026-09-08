@@ -16,8 +16,8 @@ pub mod timers;
 use base64::Engine as _;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
-use rquickjs::function::{Func, This};
-use rquickjs::{Class, Ctx, Object, TypedArray, Value};
+use rquickjs::function::{Constructor, Func, This};
+use rquickjs::{Class, Ctx, Filter, Object, TypedArray, Value};
 
 /// Install `atob`, `btoa`, `structuredClone`, `performance`, `FormData`
 /// and `CompressionStream` / `DecompressionStream`.
@@ -115,7 +115,39 @@ fn forgiving_base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 /// pass-through, which would alias the original.
 fn structured_clone<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Value<'js>> {
   let mut seen: Vec<(Value<'js>, Value<'js>)> = Vec::new();
-  clone_value(&ctx, &value, &mut seen)
+  let realm = Realm::read(&ctx)?;
+  clone_value(&ctx, &realm, &value, &mut seen)
+}
+
+/// The constructors and the prototype the clone walk compares against.
+///
+/// Read once per `structuredClone`, not once per object: deciding what
+/// an object is used to cost four global lookups and four `instanceof`
+/// prototype walks EVERY time the walk descended, which on a document
+/// of small objects is most of the work.
+struct Realm<'js> {
+  date: Value<'js>,
+  regexp: Value<'js>,
+  map: Value<'js>,
+  set: Value<'js>,
+  object_proto: Option<Object<'js>>,
+}
+
+impl<'js> Realm<'js> {
+  fn read(ctx: &Ctx<'js>) -> rquickjs::Result<Self> {
+    let globals = ctx.globals();
+    let object: Value<'js> = globals.get("Object")?;
+    Ok(Self {
+      date: globals.get("Date")?,
+      regexp: globals.get("RegExp")?,
+      map: globals.get("Map")?,
+      set: globals.get("Set")?,
+      object_proto: object
+        .as_object()
+        .and_then(|o| o.get::<_, Value<'js>>("prototype").ok())
+        .and_then(|v| v.as_object().cloned()),
+    })
+  }
 }
 
 fn data_clone_error(ctx: &Ctx<'_>, what: &str) -> rquickjs::Error {
@@ -132,6 +164,7 @@ fn data_clone_error(ctx: &Ctx<'_>, what: &str) -> rquickjs::Error {
 
 fn clone_value<'js>(
   ctx: &Ctx<'js>,
+  realm: &Realm<'js>,
   value: &Value<'js>,
   seen: &mut Vec<(Value<'js>, Value<'js>)>,
 ) -> rquickjs::Result<Value<'js>> {
@@ -149,22 +182,46 @@ fn clone_value<'js>(
     return Ok(clone.clone());
   }
 
-  let globals = ctx.globals();
-  let is_a = |name: &str| -> rquickjs::Result<bool> {
-    let ctor: Value<'js> = globals.get(name)?;
-    Ok(obj.is_instance_of(&ctor))
-  };
+  // Arrays and plain objects first, and both answer from the object
+  // itself: an array is a native type test, and a plain object is the
+  // one whose prototype IS `Object.prototype`. Between them they are
+  // almost everything a document contains, and neither now costs a
+  // single `instanceof` walk.
+  if let Some(arr) = value.as_array() {
+    let out = rquickjs::Array::new(ctx.clone())?;
+    seen.push((value.clone(), out.clone().into_value()));
+    for i in 0..arr.len() {
+      let item: Value<'js> = arr.get(i)?;
+      out.set(i, clone_value(ctx, realm, &item, seen)?)?;
+    }
+    return Ok(out.into_value());
+  }
+
+  let proto = obj.get_prototype();
+  // `Object.create(null)` has no prototype and is still plain.
+  if proto.is_none() || proto == realm.object_proto {
+    let out = Object::new(ctx.clone())?;
+    seen.push((value.clone(), out.clone().into_value()));
+    // Own enumerable string keys, as `Value` pairs: taking them as
+    // `String` allocated and UTF-8-converted every key twice, once to
+    // read it and once to write it back.
+    for entry in obj.own_props::<Value<'js>, Value<'js>>(Filter::new().enum_only().string()) {
+      let (key, v) = entry?;
+      out.set(key, clone_value(ctx, realm, &v, seen)?)?;
+    }
+    return Ok(out.into_value());
+  }
 
   // Dates and RegExps round-trip through their own constructors.
-  if is_a("Date")? {
-    let ctor: rquickjs::function::Constructor<'js> = globals.get("Date")?;
+  if obj.is_instance_of(&realm.date) {
+    let ctor = Constructor::from_value(realm.date.clone())?;
     let time: f64 = obj
       .get::<_, rquickjs::Function<'js>>("getTime")?
       .call((This(obj.clone()),))?;
     return ctor.construct::<_, Value<'js>>((time,));
   }
-  if is_a("RegExp")? {
-    let ctor: rquickjs::function::Constructor<'js> = globals.get("RegExp")?;
+  if obj.is_instance_of(&realm.regexp) {
+    let ctor = Constructor::from_value(realm.regexp.clone())?;
     let source: String = obj.get("source")?;
     let flags: String = obj.get("flags")?;
     return ctor.construct::<_, Value<'js>>((source, flags));
@@ -180,18 +237,8 @@ fn clone_value<'js>(
     return Ok(TypedArray::new(ctx.clone(), bytes)?.into_value());
   }
 
-  if let Some(arr) = value.as_array() {
-    let out = rquickjs::Array::new(ctx.clone())?;
-    seen.push((value.clone(), out.clone().into_value()));
-    for i in 0..arr.len() {
-      let item: Value<'js> = arr.get(i)?;
-      out.set(i, clone_value(ctx, &item, seen)?)?;
-    }
-    return Ok(out.into_value());
-  }
-
-  if is_a("Map")? {
-    let ctor: rquickjs::function::Constructor<'js> = globals.get("Map")?;
+  if obj.is_instance_of(&realm.map) {
+    let ctor = Constructor::from_value(realm.map.clone())?;
     let out: Value<'js> = ctor.construct(())?;
     seen.push((value.clone(), out.clone()));
     let out_obj = out.as_object().cloned().unwrap_or_else(|| obj.clone());
@@ -200,45 +247,29 @@ fn clone_value<'js>(
       let (k, v) = entry?;
       set.call::<_, ()>((
         This(out_obj.clone()),
-        clone_value(ctx, &k, seen)?,
-        clone_value(ctx, &v, seen)?,
+        clone_value(ctx, realm, &k, seen)?,
+        clone_value(ctx, realm, &v, seen)?,
       ))?;
     }
     return Ok(out);
   }
-  if is_a("Set")? {
-    let ctor: rquickjs::function::Constructor<'js> = globals.get("Set")?;
+  if obj.is_instance_of(&realm.set) {
+    let ctor = Constructor::from_value(realm.set.clone())?;
     let out: Value<'js> = ctor.construct(())?;
     seen.push((value.clone(), out.clone()));
     let out_obj = out.as_object().cloned().unwrap_or_else(|| obj.clone());
     let add: rquickjs::Function<'js> = out_obj.get("add")?;
     for entry in iterate_entries(ctx, obj)? {
       let (k, _) = entry?;
-      add.call::<_, ()>((This(out_obj.clone()), clone_value(ctx, &k, seen)?))?;
+      add.call::<_, ()>((This(out_obj.clone()), clone_value(ctx, realm, &k, seen)?))?;
     }
     return Ok(out);
   }
 
-  // Anything with a non-Object prototype (a class instance, including
-  // the native web classes) is not a cloneable "plain object".
-  let object_ctor: Value<'js> = globals.get("Object")?;
-  let proto = obj.get_prototype();
-  let object_proto = object_ctor
-    .as_object()
-    .and_then(|o| o.get::<_, Value<'js>>("prototype").ok())
-    .and_then(|v| v.as_object().cloned());
-  if proto.is_some() && proto != object_proto {
-    return Err(data_clone_error(ctx, "an object that is not a plain object"));
-  }
-
-  let out = Object::new(ctx.clone())?;
-  seen.push((value.clone(), out.clone().into_value()));
-  for key in obj.keys::<String>() {
-    let key = key?;
-    let v: Value<'js> = obj.get(&key)?;
-    out.set(key, clone_value(ctx, &v, seen)?)?;
-  }
-  Ok(out.into_value())
+  // Anything left has a prototype of its own that is none of the
+  // cloneable exotics: a class instance, including the native web
+  // classes.
+  Err(data_clone_error(ctx, "an object that is not a plain object"))
 }
 
 /// `[...target.entries()]` as `(key, value)` pairs — how a `Map`'s

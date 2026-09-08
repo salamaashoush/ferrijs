@@ -38,6 +38,10 @@ const PATH_MEMBERS: &[&str] = &[
   "normalize",
   "relative",
   "isAbsolute",
+  "parse",
+  "format",
+  "toNamespacedPath",
+  "posix",
   "sep",
   "delimiter",
 ];
@@ -51,6 +55,10 @@ const PATH_EXPORTS: &[&str] = &[
   "normalize",
   "relative",
   "isAbsolute",
+  "parse",
+  "format",
+  "toNamespacedPath",
+  "posix",
   "sep",
   "delimiter",
 ];

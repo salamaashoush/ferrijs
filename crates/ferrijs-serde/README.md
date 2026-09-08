@@ -22,11 +22,21 @@ nightly-only); pedantic clippy is off for the same reason.
 
 ## Local deltas
 
-1. Crate renamed `rquickjs-serde` -> `ferrijs-serde`, which is the only
-   change to `src/`: the doc examples and one test-local JS variable name
-   follow the crate name.
+1. Crate renamed `rquickjs-serde` -> `ferrijs-serde`: the doc examples
+   and one test-local JS variable name follow the crate name.
 2. `Cargo.toml` takes its version, edition, repository and homepage from
    the workspace, and `rquickjs` from `[workspace.dependencies]` (0.13).
+3. `de.rs`: five changes on the deserialize hot path, all
+   behaviour-preserving. `Deserializer::from` no longer reserves a
+   hundred slots for a stack that tracks nesting depth. `current_kv`
+   holds only the value, because the key half was never read and
+   building it cost a `JS_DupValue` and a `JS_DupContext` per property.
+   `deserialize_any` answers a primitive-string map key before walking
+   the type ladder. Map keys and string values reach the visitor through
+   `visit_string` rather than `visit_str`, so the buffer is moved instead
+   of copied. `MapAccess::pop` / `SeqAccess::pop` compare against
+   `as_value()` instead of cloning the object to compare. Together these
+   halve `value_to_json`.
 
 ## Re-syncing
 

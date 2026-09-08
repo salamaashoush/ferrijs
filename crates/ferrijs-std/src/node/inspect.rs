@@ -8,6 +8,7 @@
 //! Written here, not vendored from llrt (upstream's `util` has no
 //! inspect at all and its console formatter is not reusable).
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use rquickjs::function::This;
@@ -19,7 +20,15 @@ use rquickjs::{Function, Object, Value};
 /// page content cannot smuggle terminal control codes into the output while
 /// the renderer's own styling survives.
 #[must_use]
-pub fn strip_ansi(input: &str) -> String {
+pub fn strip_ansi(input: &str) -> Cow<'_, str> {
+  // Almost nothing a script logs contains an escape, and the walk below
+  // allocated a `String` and copied it a character at a time regardless.
+  // `memchr` over the bytes settles the common case without touching
+  // the heap; an escape can only start at an ASCII byte, so scanning
+  // bytes cannot split a multi-byte character.
+  if !input.as_bytes().contains(&0x1b) {
+    return Cow::Borrowed(input);
+  }
   let mut out = String::with_capacity(input.len());
   let mut chars = input.chars().peekable();
   while let Some(c) = chars.next() {
@@ -34,7 +43,7 @@ pub fn strip_ansi(input: &str) -> String {
       out.push(c);
     }
   }
-  out
+  Cow::Owned(out)
 }
 
 

@@ -55,7 +55,11 @@ pub struct Deserializer<'js> {
     /// In strict mode, only JSON-able values are allowed.
     strict: bool,
     map_key: bool,
-    current_kv: Option<(Value<'js>, Value<'js>)>,
+    /// The value belonging to the key `next_key_seed` just handed out.
+    /// Only the value: the key half of the pair upstream kept here was
+    /// never read, and building it cost a `JS_DupValue` plus a
+    /// `JS_DupContext` for every property of every object.
+    current_kv: Option<Value<'js>>,
     /// Stack to track circular dependencies.
     stack: Vec<Value<'js>>,
 }
@@ -80,9 +84,10 @@ impl<'de> From<Value<'de>> for Deserializer<'de> {
             strict: false,
             map_key: false,
             current_kv: None,
-            // We are probaby over allocating here. But it's probably fine to
-            // over allocate to avoid paying the cost of subsequent allocations.
-            stack: Vec::with_capacity(100),
+            // The stack tracks nesting DEPTH, which is a handful of frames
+            // for any real document; reserving a hundred `Value` slots
+            // allocated 1.6 KiB on every top-level conversion to hold five.
+            stack: Vec::new(),
         }
     }
 }
@@ -151,6 +156,16 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
+        // A map key that is already a primitive string is the common case
+        // by a wide margin (the property iterator is filtered to string
+        // keys), and the ladder below would ask it three class-id
+        // questions and four type questions before reaching the same
+        // answer.
+        if self.map_key && self.value.is_string() {
+            self.map_key = false;
+            return visitor.visit_string(as_key(&self.value)?);
+        }
+
         if self.value.is_number() {
             return self.deserialize_number(visitor);
         }
@@ -191,8 +206,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         if self.value.is_string() {
             if self.map_key {
                 self.map_key = false;
-                let key = as_key(&self.value)?;
-                return visitor.visit_str(&key);
+                return visitor.visit_string(as_key(&self.value)?);
             } else {
                 let val = self
                     .value
@@ -202,7 +216,9 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
                             .unwrap_or_else(|e| to_string_lossy(self.value.ctx(), s, e))
                     })
                     .unwrap();
-                return visitor.visit_str(&val);
+                // `visit_string` moves the buffer we already own; `visit_str`
+                // made the visitor copy it again.
+                return visitor.visit_string(val);
             }
         }
 
@@ -355,7 +371,7 @@ impl<'a, 'de> MapAccess<'a, 'de> {
     /// Errors if a different value is popped.
     fn pop(&mut self) -> Result<()> {
         let v = self.de.pop_visited()?;
-        if v != self.obj.clone().into_value() {
+        if &v != self.obj.as_value() {
             return Err(Error::new(
                 "Popped a mismatched value. Expected the top level sequence value",
             ));
@@ -395,16 +411,16 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
                     let value_of = get_valueof(&v);
                     if let Some(f) = value_of {
                         let v = f.call((This(v.clone()),)).map_err(Error::new)?;
-                        self.de.current_kv = Some((k.clone(), v));
+                        self.de.current_kv = Some(v);
                     }
                 } else if class_id == ClassId::String as u32 {
                     let to_string = get_to_string(&v);
                     if let Some(f) = to_string {
                         let v = f.call((This(v.clone()),)).map_err(Error::new)?;
-                        self.de.current_kv = Some((k.clone(), v));
+                        self.de.current_kv = Some(v);
                     }
                 } else {
-                    self.de.current_kv = Some((k.clone(), v));
+                    self.de.current_kv = Some(v);
                 }
                 self.de.value = k;
                 self.de.map_key = true;
@@ -421,7 +437,14 @@ impl<'de> de::MapAccess<'de> for MapAccess<'_, 'de> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        self.de.value = self.de.current_kv.clone().unwrap().1;
+        // Taken, not cloned: `next_key_seed` put it here for exactly this
+        // call and nothing reads it afterwards.
+        let value = self
+            .de
+            .current_kv
+            .take()
+            .ok_or_else(|| Error::new("next_value_seed called without a pending value"))?;
+        self.de.value = value;
         self.de.check_cycles()?;
         seed.deserialize(&mut *self.de)
     }
@@ -475,7 +498,7 @@ impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
     /// Errors if a different value is popped.
     fn pop(&mut self) -> Result<()> {
         let v = self.de.pop_visited()?;
-        if v != self.seq.clone().into_value() {
+        if &v != self.seq.as_value() {
             return Err(Error::new(
                 "Popped a mismatched value. Expected the top level sequence value",
             ));
