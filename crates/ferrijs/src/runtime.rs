@@ -20,7 +20,7 @@ use ferrijs_permissions::{Container, Permissions};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Value};
 
 use crate::console::{ConsoleCapture, ConsoleSink};
-use crate::console_fmt::install_console;
+use crate::console_fmt::{ConsoleSlot, install_console_slot};
 use crate::error::{ScriptError, ScriptErrorKind};
 use crate::extension::Extension;
 use crate::limits::{AppliedLimits, Deadline, Limits, NeverParked, PauseClock, RunOptions, TimeoutState, run_within};
@@ -106,6 +106,10 @@ pub struct Config {
   /// Install the timer globals (`setTimeout` and the rest). On unless a
   /// host installs timers of its own through an extension.
   pub timers: bool,
+  /// How many compiled scripts the realm keeps, so a repeated
+  /// [`Runtime::eval_script`] is not re-parsed. Zero turns it off. See
+  /// [`crate::script_cache`].
+  pub script_cache: usize,
   /// What `fetch` sends through. `None` installs no `fetch` at all; the
   /// default is the standalone [`crate::fetch::Client`].
   #[cfg(feature = "fetch")]
@@ -125,6 +129,7 @@ impl std::fmt::Debug for Config {
       .field("permissions", &self.permissions)
       .field("fs_global", &self.fs_global)
       .field("timers", &self.timers)
+      .field("script_cache", &self.script_cache)
       .field(
         "extensions",
         &self.extensions.iter().map(|e| e.name().to_string()).collect::<Vec<_>>(),
@@ -154,6 +159,7 @@ impl Default for Builder {
         pause_clock: Arc::new(NeverParked),
         fs_global: false,
         timers: true,
+        script_cache: crate::script_cache::DEFAULT_SCRIPT_CACHE,
         #[cfg(feature = "fetch")]
         fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
@@ -236,6 +242,16 @@ impl Builder {
   #[must_use]
   pub fn timers(mut self, on: bool) -> Self {
     self.config.timers = on;
+    self
+  }
+
+  /// How many compiled scripts the realm keeps so a repeated
+  /// [`Runtime::eval_script`] skips the parse. Zero turns it off, for a
+  /// host that runs every script exactly once and would rather not hold
+  /// the function objects.
+  #[must_use]
+  pub fn script_cache(mut self, entries: usize) -> Self {
+    self.config.script_cache = entries;
     self
   }
 
@@ -391,10 +407,12 @@ pub struct Runtime {
   poisoned: AtomicBool,
   /// The capture installed when the realm was built. Kept because a
   /// streaming console needs no per-run one: with a sink, `push`
-  /// forwards and retains nothing, so a fresh capture per run would
-  /// re-install nineteen closures to arrive at the same behaviour. See
-  /// [`Self::run`].
+  /// forwards and retains nothing, so a fresh capture per run would be
+  /// a second object with the same sink behind it. See [`Self::run`].
   base_console: Arc<ConsoleCapture>,
+  /// The realm's one `console`, built once. A run points it at its own
+  /// capture rather than rebuilding two dozen native closures.
+  console_slot: Arc<ConsoleSlot>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -413,7 +431,8 @@ impl Runtime {
   }
 
   async fn create(config: Config) -> Result<Self, ScriptError> {
-    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
+    let runtime = AsyncRuntime::new_with_alloc(crate::alloc::MiAllocator)
+      .map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
 
     runtime.set_memory_limit(config.limits.memory).await;
     runtime.set_max_stack_size(config.limits.stack).await;
@@ -484,6 +503,8 @@ impl Runtime {
     let base_console = Arc::new(Self::console_capture(&config));
     let install_console_capture = Arc::clone(&base_console);
     let kept_console = Arc::clone(&base_console);
+    let console_slot = Arc::new(ConsoleSlot::new(Arc::clone(&base_console)));
+    let install_slot = Arc::clone(&console_slot);
     let install_registry = Arc::clone(&registry);
     let ud_vm = vm.clone();
     let permissions = Arc::clone(&config.permissions);
@@ -499,6 +520,7 @@ impl Runtime {
     };
     let fs_global = config.fs_global;
     let timers = config.timers;
+    let script_cache = config.script_cache;
     #[cfg(feature = "fetch")]
     let fetch_backend = config.fetch.clone();
     let realm = config.realm.clone();
@@ -509,6 +531,7 @@ impl Runtime {
       let _ = ctx.store_userdata(RegistryUd(Arc::clone(&install_registry)));
       ferrijs_std::permissions::install(&ctx, permissions);
       ferrijs_std::identity::set(&ctx, identity);
+      crate::script_cache::install(&ctx, script_cache);
 
       let fail = |what: &str, e: rquickjs::Error| ScriptError::internal(format!("failed to install {what}: {e}"));
       ferrijs_std::init(&ctx).map_err(|e| fail("the standard library", e))?;
@@ -525,8 +548,9 @@ impl Runtime {
         crate::fetch::install(&ctx, backend).map_err(|e| fail("fetch", e))?;
       }
       // A console from the start, so an extension's top-level
-      // `console.log` has somewhere to go; each run swaps in its own.
-      install_console(&ctx, base_console).map_err(|e| fail("console", e))?;
+      // `console.log` has somewhere to go; each run retargets it at its
+      // own capture.
+      install_console_slot(&ctx, &install_slot).map_err(|e| fail("console", e))?;
 
       for extension in &extensions {
         extension
@@ -558,6 +582,7 @@ impl Runtime {
       timeout,
       poisoned: AtomicBool::new(false),
       base_console: kept_console,
+      console_slot,
     })
   }
 
@@ -685,16 +710,11 @@ impl Runtime {
     }
     let timeout = self.apply_run_options(&options).await;
     let token = self.timeout.arm(started + timeout);
-    let run_console = Arc::clone(&console);
+    if !streaming {
+      self.console_slot.retarget(Arc::clone(&console));
+    }
 
-    let fut = vm_with!(self.vm => |ctx| {
-      if !streaming
-        && let Err(e) = install_console(&ctx, run_console)
-      {
-        return Err(ScriptError::internal(format!("failed to install console: {e}")));
-      }
-      body(ctx).await
-    });
+    let fut = vm_with!(self.vm => |ctx| { body(ctx).await });
 
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
     let outcome = match run_within(self.timeout.clock(), backstop, fut).await {
@@ -805,6 +825,22 @@ impl Runtime {
   /// global. A module cannot use top-level `return`, so the run's value
   /// is the module's `default` export (`null` when it has none). Error
   /// positions are remapped through the module's source map.
+  ///
+  /// # A realm can only evaluate so many modules
+  ///
+  /// `QuickJS` appends every declared module to the context's module
+  /// list and frees it only when the context dies: there is no unload,
+  /// and the engine exposes no API to remove one. Each evaluation
+  /// therefore retains roughly 1.8 KiB that nothing reclaims, so a
+  /// long-lived realm that evaluates modules in a loop will eventually
+  /// hit its memory limit, and an allocation fault poisons the realm.
+  ///
+  /// At the 256 MiB default that is on the order of a hundred thousand
+  /// evaluations, which no interactive host reaches; a batch one that
+  /// might should build a realm per unit of work (`build_run_drop` in
+  /// the benchmarks costs about 230 us) or recycle the realm on a
+  /// count. [`Self::eval_script`] does not have this property -- a
+  /// script is not a module and is collected normally.
   pub async fn eval_module(
     &self,
     module: &CompiledModule,
@@ -850,6 +886,13 @@ impl Runtime {
 
   /// Declare and evaluate an ES module from source, under `name`, with
   /// `args` bound. For a host without a bundler, or a test.
+  ///
+  /// Retains a module per call for the realm's life, like
+  /// [`Self::eval_module`]; see the note there. Re-using one `name`
+  /// does not reuse the module either -- the engine keys instances by
+  /// name at RESOLVE time but appends unconditionally at declare time,
+  /// so a later `import` of that name links to the first instance while
+  /// the rest accumulate.
   pub async fn eval_module_source(
     &self,
     name: &str,
@@ -904,11 +947,25 @@ pub async fn script_body(
   args: &[serde_json::Value],
 ) -> Result<serde_json::Value, ScriptError> {
   install_args(ctx, args)?;
-  // One line of wrapper before the user's source, so a reported
-  // position is offset by one.
-  let wrapped = format!("(async () => {{\n{source}\n}})()");
-  let promise: rquickjs::Promise<'_> = ctx
-    .eval(wrapped.as_bytes())
+  let body = match crate::script_cache::get(ctx, source) {
+    Some(f) => f,
+    None => {
+      // One line of wrapper before the user's source, so a reported
+      // position is offset by one. The arrow is compiled but not
+      // called, so the same function serves every later run.
+      let mut wrapped = String::with_capacity(source.len() + 24);
+      wrapped.push_str("(async () => {\n");
+      wrapped.push_str(source);
+      wrapped.push_str("\n})");
+      let f: rquickjs::Function<'_> = ctx
+        .eval(wrapped.as_bytes())
+        .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+      crate::script_cache::put(ctx, source, &f);
+      f
+    },
+  };
+  let promise: rquickjs::Promise<'_> = body
+    .call(())
     .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
   let value: Value<'_> = promise
     .into_future::<Value<'_>>()

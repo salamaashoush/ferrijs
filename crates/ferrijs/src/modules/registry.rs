@@ -18,6 +18,7 @@ use std::sync::Arc;
 use rquickjs::loader::{BuiltinResolver, ImportAttributes, Loader, Resolver};
 use rquickjs::module::ModuleDef;
 use rquickjs::{Ctx, Module, Object};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// How a module is declared to the ES loader.
 pub type DeclareFn = Arc<dyn for<'js> Fn(Ctx<'js>, Vec<u8>) -> rquickjs::Result<Module<'js>> + Send + Sync>;
@@ -118,6 +119,16 @@ pub struct ModuleRegistry {
   /// modules it serves.
   reserved_prefixes: Vec<String>,
   reserved_names: Vec<String>,
+  /// Every specifier and alias this table answers to, pointing at the
+  /// module that answers it. Module resolution and `require` both run
+  /// through here on every import, and a linear walk of fifty modules
+  /// with a `String` per comparison is not what that should cost.
+  /// Rebuilt by every mutator, all of which run at startup.
+  index: FxHashMap<String, usize>,
+  /// The bare spelling of every `node:` name served, so `is_reserved`
+  /// answers the "claim on `fs` while we serve `node:fs`" case without
+  /// materialising the whole name list.
+  bare_twins: FxHashSet<String>,
 }
 
 impl std::fmt::Debug for ModuleRegistry {
@@ -145,7 +156,31 @@ impl ModuleRegistry {
       registry.modules.push(module.into());
     }
     registry.reserved_prefixes.push("node:".to_string());
+    registry.reindex();
     registry
+  }
+
+  /// Rebuild the specifier index. Every mutator ends here; the table is
+  /// assembled once at startup and read on every import after that.
+  fn reindex(&mut self) {
+    let specifiers: usize = self.modules.iter().map(|m| m.specifiers.len()).sum();
+    self.index.clear();
+    self.index.reserve(specifiers + self.aliases.len());
+    self.bare_twins.clear();
+    self.bare_twins.reserve(specifiers);
+    for (i, module) in self.modules.iter().enumerate() {
+      for specifier in &module.specifiers {
+        self.index.insert(specifier.clone(), i);
+        if let Some(bare) = specifier.strip_prefix("node:") {
+          self.bare_twins.insert(bare.to_string());
+        }
+      }
+    }
+    for (from, to) in &self.aliases {
+      if let Some(i) = self.index.get(to).copied() {
+        self.index.insert(from.clone(), i);
+      }
+    }
   }
 
   /// Add a module. A specifier already served is an error: the second
@@ -162,6 +197,7 @@ impl ModuleRegistry {
       }
     }
     self.modules.push(module);
+    self.reindex();
     Ok(())
   }
 
@@ -202,6 +238,7 @@ impl ModuleRegistry {
       Some(entry) => entry.1 = to,
       None => self.aliases.push((from, to)),
     }
+    self.reindex();
     Ok(())
   }
 
@@ -209,14 +246,25 @@ impl ModuleRegistry {
   /// policy that serves a subset of the standard library applies.
   pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
     self.modules.retain(|m| keep(m.canonical()));
-    let served: Vec<String> = self.modules.iter().flat_map(|m| m.specifiers.clone()).collect();
-    self.aliases.retain(|(_, to)| served.contains(to));
+    let modules = &self.modules;
+    self.aliases.retain(|(_, to)| modules.iter().any(|m| m.answers_to(to)));
+    self.reindex();
   }
 
   /// Reserve a specifier prefix (`@acme/`) so nothing else may claim a
   /// name under it.
   pub fn reserve_prefix(&mut self, prefix: impl Into<String>) {
     self.reserved_prefixes.push(prefix.into());
+  }
+
+  /// Every specifier served natively, aliases included, without the
+  /// `Vec<String>` [`Self::names`] builds.
+  pub fn names_iter(&self) -> impl Iterator<Item = &str> {
+    self
+      .modules
+      .iter()
+      .flat_map(|m| m.specifiers.iter().map(String::as_str))
+      .chain(self.aliases.iter().map(|(from, _)| from.as_str()))
   }
 
   /// Reserve one specifier.
@@ -245,7 +293,7 @@ impl ModuleRegistry {
   /// Whether `specifier` is served, directly or through an alias.
   #[must_use]
   pub fn serves(&self, specifier: &str) -> bool {
-    self.canonical(specifier).is_some()
+    self.index.contains_key(specifier)
   }
 
   /// The canonical name of the module `specifier` resolves to: the
@@ -253,16 +301,14 @@ impl ModuleRegistry {
   /// equal.
   #[must_use]
   pub fn canonical(&self, specifier: &str) -> Option<String> {
-    let target = self
-      .aliases
-      .iter()
-      .find(|(from, _)| from == specifier)
-      .map_or(specifier, |(_, to)| to.as_str());
-    self
-      .modules
-      .iter()
-      .find(|m| m.answers_to(target))
-      .map(|m| m.canonical().to_string())
+    self.canonical_str(specifier).map(ToString::to_string)
+  }
+
+  /// [`Self::canonical`] without the copy, for a caller that only
+  /// compares or prints the answer.
+  #[must_use]
+  pub fn canonical_str(&self, specifier: &str) -> Option<&str> {
+    self.module_for(specifier).map(NativeModule::canonical)
   }
 
   /// Whether `specifier` is off-limits to anything outside the runtime:
@@ -277,10 +323,7 @@ impl ModuleRegistry {
     if self.reserved_prefixes.iter().any(|p| specifier.starts_with(p)) {
       return true;
     }
-    self
-      .names()
-      .iter()
-      .any(|name| name.strip_prefix("node:") == Some(specifier))
+    self.bare_twins.contains(specifier)
   }
 
   /// A stable fingerprint of the served names and aliases, for a cache
@@ -290,8 +333,8 @@ impl ModuleRegistry {
   #[must_use]
   pub fn fingerprint(&self) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut names = self.names();
-    names.sort();
+    let mut names: Vec<&str> = self.names_iter().collect();
+    names.sort_unstable();
     let mut aliases = self.aliases.clone();
     aliases.sort();
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -301,8 +344,7 @@ impl ModuleRegistry {
   }
 
   fn module_for(&self, specifier: &str) -> Option<&NativeModule> {
-    let canonical = self.canonical(specifier)?;
-    self.modules.iter().find(|m| m.canonical() == canonical)
+    self.index.get(specifier).and_then(|i| self.modules.get(*i))
   }
 
   /// The object `require(specifier)` returns, or `None` for a specifier
@@ -323,7 +365,7 @@ impl ModuleRegistry {
   #[must_use]
   pub fn loader(self: &Arc<Self>) -> (NativeResolver, NativeLoader) {
     let mut builtin = BuiltinResolver::default();
-    for name in self.names() {
+    for name in self.names_iter() {
       builtin.add_module(name);
     }
     (

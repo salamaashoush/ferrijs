@@ -16,6 +16,7 @@
 //! human at a terminal wants, where the limits above (which exist to bound a
 //! single result document) would only mangle the output.
 
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -197,7 +198,15 @@ impl ConsoleCapture {
 /// Strip ANSI escape sequences from a captured message so untrusted text
 /// a script logs cannot poison a terminal with control codes.
 #[must_use]
-pub fn strip_ansi(input: &str) -> String {
+pub fn strip_ansi(input: &str) -> Cow<'_, str> {
+  // Almost nothing a script logs contains an escape, and the walk below
+  // allocated a `String` and copied it a character at a time regardless.
+  // `memchr` over the bytes settles the common case without touching
+  // the heap; an escape can only start at an ASCII byte, so scanning
+  // bytes cannot split a multi-byte character.
+  if !input.as_bytes().contains(&0x1b) {
+    return Cow::Borrowed(input);
+  }
   let mut out = String::with_capacity(input.len());
   let mut chars = input.chars().peekable();
   while let Some(c) = chars.next() {
@@ -212,7 +221,7 @@ pub fn strip_ansi(input: &str) -> String {
       out.push(c);
     }
   }
-  out
+  Cow::Owned(out)
 }
 
 #[cfg(test)]

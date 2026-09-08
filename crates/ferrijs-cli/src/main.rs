@@ -12,6 +12,12 @@ use ferrijs::{
 };
 use ferrijs_bundle::{Bundler, BundlerOptions, BytecodeCache};
 
+/// The engine already runs on mimalloc; putting the host side on it too
+/// means the bundler, the source maps and every binding's `String` come
+/// off the same heap, with no second allocator's arenas alongside it.
+#[global_allocator]
+static GLOBAL: ferrijs::alloc::MiGlobal = ferrijs::alloc::MiGlobal;
+
 #[derive(Parser)]
 #[command(name = "ferrijs", version, about = "An embeddable JavaScript runtime on QuickJS", long_about = None)]
 struct Cli {
@@ -261,17 +267,46 @@ fn report(run: &ferrijs::Run<serde_json::Value>) -> ExitCode {
   }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// `FERRIJS_STARTUP_TRACE=1` prints how long each startup phase took.
+///
+/// Worth knowing before reading them: on a typical macOS box most of a
+/// `ferrijs eval` is spent before `main` is reached at all -- process
+/// spawn, dyld and, where an endpoint-security agent is installed, its
+/// inspection of the exec. These stamps measure only what happens after
+/// that, which is the part this binary can do anything about.
+fn main() -> ExitCode {
+  let t = std::time::Instant::now();
+  let trace = std::env::var_os("FERRIJS_STARTUP_TRACE").is_some();
+  let stamp = move |what: &str| {
+    if trace {
+      eprintln!("  {:>8.3} ms  {what}", t.elapsed().as_secs_f64() * 1000.0);
+    }
+  };
+  stamp("main entered");
+  let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+  stamp("tokio runtime built");
+  let code = rt.block_on(async_main(&stamp));
+  stamp("work done");
+  code
+}
+
+async fn async_main(stamp: &dyn Fn(&str)) -> ExitCode {
   tracing_subscriber::fmt()
     .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
     .with_writer(std::io::stderr)
     .init();
+  stamp("tracing installed");
   let cli = Cli::parse();
+  stamp("args parsed");
   let outcome = match cli.command {
     Command::Run { file, args, grants } => run_file(file, args, grants).await,
     Command::Eval { source, grants } => match grants.runtime(std::env::current_dir().unwrap_or_default()).await {
-      Ok(rt) => Ok(rt.eval_script(&source, &[], RunOptions::default()).await),
+      Ok(rt) => {
+        stamp("realm built");
+        let r = rt.eval_script(&source, &[], RunOptions::default()).await;
+        stamp("script evaluated");
+        Ok(r)
+      },
       Err(e) => Err(e),
     },
   };

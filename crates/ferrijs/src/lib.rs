@@ -36,6 +36,7 @@
   clippy::unused_self
 )]
 
+pub mod alloc;
 pub mod console;
 pub mod console_fmt;
 pub mod error;
@@ -48,6 +49,7 @@ pub mod realm;
 pub mod redact;
 pub mod result;
 pub mod runtime;
+pub mod script_cache;
 pub mod source_map;
 pub mod timers;
 pub mod value;

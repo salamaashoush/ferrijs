@@ -17,7 +17,7 @@
 //! own styling survives.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use rquickjs::function::{Func, Rest};
@@ -45,12 +45,58 @@ impl ConsoleState {
   }
 }
 
+/// What the realm's one `console` writes to, and the bookkeeping behind
+/// it.
+///
+/// The console object is roughly two dozen native closures and the JS
+/// object holding them. Building it costs about as much as a small
+/// script, so a realm builds it once and a run only points it at its own
+/// buffer: [`retarget`](Self::retarget) swaps the capture and clears the
+/// grouping, counter and timer state a previous run may have left open.
+pub struct ConsoleSlot {
+  capture: RwLock<Arc<ConsoleCapture>>,
+  state: ConsoleState,
+}
+
+impl ConsoleSlot {
+  #[must_use]
+  pub fn new(capture: Arc<ConsoleCapture>) -> Self {
+    Self {
+      capture: RwLock::new(capture),
+      state: ConsoleState::default(),
+    }
+  }
+
+  /// Point the console at `capture` for the run that is starting, and
+  /// reset what the previous run left behind.
+  pub fn retarget(&self, capture: Arc<ConsoleCapture>) {
+    if let Ok(mut slot) = self.capture.write() {
+      *slot = capture;
+    }
+    self.state.indent.store(0, Ordering::Relaxed);
+    if let Ok(mut counts) = self.state.counts.lock() {
+      counts.clear();
+    }
+    if let Ok(mut timers) = self.state.timers.lock() {
+      timers.clear();
+    }
+  }
+
+  fn with_capture<R>(&self, f: impl FnOnce(&ConsoleCapture) -> R) -> Option<R> {
+    self.capture.read().ok().map(|c| f(&c))
+  }
+
+  fn clear(&self) {
+    self.with_capture(ConsoleCapture::clear);
+  }
+}
+
 /// Push one rendered message, indented by the current `console.group` depth
 /// (Node indents every line of a multi-line message).
-fn emit(capture: &ConsoleCapture, state: &ConsoleState, level: ConsoleLevel, message: &str) {
-  let prefix = state.indent_prefix();
+fn emit(slot: &ConsoleSlot, level: ConsoleLevel, message: &str) {
+  let prefix = slot.state.indent_prefix();
   if prefix.is_empty() {
-    capture.push(level, message);
+    slot.with_capture(|c| c.push(level, message));
     return;
   }
   let indented = message
@@ -58,7 +104,7 @@ fn emit(capture: &ConsoleCapture, state: &ConsoleState, level: ConsoleLevel, mes
     .map(|line| format!("{prefix}{line}"))
     .collect::<Vec<_>>()
     .join("\n");
-  capture.push(level, indented);
+  slot.with_capture(|c| c.push(level, indented));
 }
 
 /// A `label`-taking console method's argument: Node coerces a missing label to
@@ -245,14 +291,25 @@ fn render_table(table: &Table) -> String {
   out.join("\n")
 }
 
-/// Install the `console` global backed by `capture`.
+/// Install the `console` global backed by `capture`, in a slot of its
+/// own. For a caller with no slot to keep; a realm uses
+/// [`install_console_slot`] so later runs can retarget it.
 pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
-  let state = Arc::new(ConsoleState::default());
+  install_console_slot(ctx, &Arc::new(ConsoleSlot::new(capture)))
+}
+
+/// Install the `console` global writing through `slot`.
+///
+/// Whether ANSI styling is safe is read from the slot's current capture
+/// once, here: it comes from the realm's sink, which a retarget never
+/// changes.
+pub fn install_console_slot(ctx: &Ctx<'_>, slot: &Arc<ConsoleSlot>) -> rquickjs::Result<()> {
+  let styled = |level| slot.with_capture(|c| c.styled_for(level)).unwrap_or(false);
   // `log` and `error` land on different streams, so whether ANSI styling is
   // safe is decided per level, not once for the whole console.
-  let log_inspector = Inspector::new(capture.styled_for(ConsoleLevel::Log));
-  let error_inspector = Inspector::new(capture.styled_for(ConsoleLevel::Error));
-  let trace_inspector = Inspector::new(capture.styled_for(ConsoleLevel::Trace));
+  let log_inspector = Inspector::new(styled(ConsoleLevel::Log));
+  let error_inspector = Inspector::new(styled(ConsoleLevel::Error));
+  let trace_inspector = Inspector::new(styled(ConsoleLevel::Trace));
   let console = Object::new(ctx.clone())?;
 
   for (name, level) in [
@@ -262,23 +319,21 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
     ("error", ConsoleLevel::Error),
     ("debug", ConsoleLevel::Debug),
   ] {
-    let cap = capture.clone();
-    let st = state.clone();
-    let inspector = Inspector::new(capture.styled_for(level));
+    let slot = slot.clone();
+    let inspector = Inspector::new(styled(level));
     console.set(
       name,
       Func::from(move |args: Rest<Value<'_>>| -> rquickjs::Result<()> {
         let mut msg = String::new();
         inspector.args(&mut msg, &args.0)?;
-        emit(&cap, &st, level, &msg);
+        emit(&slot, level, &msg);
         Ok(())
       }),
     )?;
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "trace",
       Func::from(move |ctx: Ctx<'_>, args: Rest<Value<'_>>| -> rquickjs::Result<()> {
@@ -297,15 +352,14 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
           msg.push('\n');
           msg.push_str(strip_ansi(&stack).trim_end());
         }
-        emit(&cap, &st, ConsoleLevel::Trace, &msg);
+        emit(&slot, ConsoleLevel::Trace, &msg);
         Ok(())
       }),
     )?;
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "dir",
       Func::from(
@@ -338,7 +392,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
             .quoted()
             .with_depth(depth)
             .value(&mut msg, &value, 0)?;
-          emit(&cap, &st, ConsoleLevel::Log, &msg);
+          emit(&slot, ConsoleLevel::Log, &msg);
           Ok(())
         },
       ),
@@ -346,8 +400,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "table",
       Func::from(
@@ -364,7 +417,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
             // A primitive has no table shape — Node logs it as-is.
             None => log_inspector.quoted().value(&mut msg, &data, 0)?,
           }
-          emit(&cap, &st, ConsoleLevel::Log, &msg);
+          emit(&slot, ConsoleLevel::Log, &msg);
           Ok(())
         },
       ),
@@ -372,28 +425,28 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   for name in ["group", "groupCollapsed"] {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       name,
       Func::from(move |args: Rest<Value<'_>>| -> rquickjs::Result<()> {
         if !args.0.is_empty() {
           let mut msg = String::new();
           log_inspector.args(&mut msg, &args.0)?;
-          emit(&cap, &st, ConsoleLevel::Log, &msg);
+          emit(&slot, ConsoleLevel::Log, &msg);
         }
-        st.indent.fetch_add(1, Ordering::Relaxed);
+        slot.state.indent.fetch_add(1, Ordering::Relaxed);
         Ok(())
       }),
     )?;
   }
 
   {
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "groupEnd",
       Func::from(move || {
-        let _ = st
+        let _ = slot
+          .state
           .indent
           .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(1)));
       }),
@@ -401,30 +454,29 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "count",
       Func::from(move |label: rquickjs::function::Opt<String>| -> rquickjs::Result<()> {
         let label = label_or_default(label.0);
-        let n = st.counts.lock().map_or(0, |mut c| {
+        let n = slot.state.counts.lock().map_or(0, |mut c| {
           let n = c.entry(label.clone()).or_insert(0);
           *n += 1;
           *n
         });
-        emit(&cap, &st, ConsoleLevel::Log, &format!("{}: {n}", strip_ansi(&label)));
+        emit(&slot, ConsoleLevel::Log, &format!("{}: {n}", strip_ansi(&label)));
         Ok(())
       }),
     )?;
   }
 
   {
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "countReset",
       Func::from(move |label: rquickjs::function::Opt<String>| {
         let label = label_or_default(label.0);
-        if let Ok(mut counts) = st.counts.lock() {
+        if let Ok(mut counts) = slot.state.counts.lock() {
           counts.remove(&label);
         }
       }),
@@ -432,20 +484,19 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "time",
       Func::from(move |label: rquickjs::function::Opt<String>| {
         let label = label_or_default(label.0);
-        let duplicate = st
+        let duplicate = slot
+          .state
           .timers
           .lock()
           .is_ok_and(|mut t| t.insert(label.clone(), Instant::now()).is_some());
         if duplicate {
           emit(
-            &cap,
-            &st,
+            &slot,
             ConsoleLevel::Warn,
             &format!("Label '{}' already exists for console.time()", strip_ansi(&label)),
           );
@@ -455,14 +506,13 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   for (name, remove) in [("timeEnd", true), ("timeLog", false)] {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       name,
       Func::from(
         move |label: rquickjs::function::Opt<String>, args: Rest<Value<'_>>| -> rquickjs::Result<()> {
           let label = label_or_default(label.0);
-          let started = st.timers.lock().ok().and_then(|mut t| {
+          let started = slot.state.timers.lock().ok().and_then(|mut t| {
             if remove {
               t.remove(&label)
             } else {
@@ -473,8 +523,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
             // Node emits this through `process.emitWarning`, which lands on
             // stderr with exactly this text.
             emit(
-              &cap,
-              &st,
+              &slot,
               ConsoleLevel::Warn,
               &format!("No such label '{}' for console.{name}()", strip_ansi(&label)),
             );
@@ -485,7 +534,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
             msg.push(' ');
             log_inspector.args(&mut msg, &args.0)?;
           }
-          emit(&cap, &st, ConsoleLevel::Log, &msg);
+          emit(&slot, ConsoleLevel::Log, &msg);
           Ok(())
         },
       ),
@@ -493,8 +542,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "assert",
       Func::from(
@@ -507,7 +555,7 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
             msg.push_str(": ");
             error_inspector.args(&mut msg, &args.0)?;
           }
-          emit(&cap, &st, ConsoleLevel::Error, &msg);
+          emit(&slot, ConsoleLevel::Error, &msg);
           Ok(())
         },
       ),
@@ -515,15 +563,14 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   }
 
   {
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "clear",
       Func::from(move || {
         // Node resets group indentation on clear whether or not the stream
         // can actually be cleared.
-        st.indent.store(0, Ordering::Relaxed);
-        cap.clear();
+        slot.state.indent.store(0, Ordering::Relaxed);
+        slot.clear();
       }),
     )?;
   }
@@ -531,14 +578,13 @@ pub fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs:
   {
     // Node's `dirxml` has no XML rendering outside a browser devtools host:
     // it is documented as an alias for `console.log`.
-    let cap = capture.clone();
-    let st = state.clone();
+    let slot = slot.clone();
     console.set(
       "dirxml",
       Func::from(move |args: Rest<Value<'_>>| -> rquickjs::Result<()> {
         let mut msg = String::new();
         log_inspector.args(&mut msg, &args.0)?;
-        emit(&cap, &st, ConsoleLevel::Log, &msg);
+        emit(&slot, ConsoleLevel::Log, &msg);
         Ok(())
       }),
     )?;

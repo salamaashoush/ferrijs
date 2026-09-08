@@ -90,6 +90,16 @@ pub struct RunOptions {
 pub trait PauseClock: Send + Sync {
   /// Total parked time so far, including a park still open.
   fn parked_now(&self) -> Duration;
+
+  /// Whether this clock can ever report parked time. A host with no
+  /// debugger answers `true` (the default clock does), which lets the
+  /// run bracket drop the deadline arithmetic that only exists to give
+  /// a stopped process its time back: a virtual call per arm, two per
+  /// backstop poll, and a loop around the backstop that can never
+  /// iterate twice.
+  fn never_parks(&self) -> bool {
+    false
+  }
 }
 
 /// The clock of a host that never parks.
@@ -99,6 +109,10 @@ pub struct NeverParked;
 impl PauseClock for NeverParked {
   fn parked_now(&self) -> Duration {
     Duration::ZERO
+  }
+
+  fn never_parks(&self) -> bool {
+    true
   }
 }
 
@@ -144,6 +158,9 @@ pub(crate) struct TimeoutState {
   /// Never cleared: the realm is poisoned from then on.
   pub timed_out: AtomicBool,
   clock: Arc<dyn PauseClock>,
+  /// [`PauseClock::never_parks`], read once: it cannot change, and the
+  /// interrupt handler consults it on every check.
+  never_parks: bool,
 }
 
 /// The token an armed budget answers to; disarm with it.
@@ -164,6 +181,7 @@ impl TimeoutState {
       armed: std::sync::Mutex::new(Vec::new()),
       next_token: AtomicU64::new(1),
       timed_out: AtomicBool::new(false),
+      never_parks: clock.never_parks(),
       clock,
     }
   }
@@ -211,6 +229,9 @@ impl TimeoutState {
   }
 
   fn parked_ms(&self) -> u64 {
+    if self.never_parks {
+      return 0;
+    }
     u64::try_from(self.clock.parked_now().as_millis()).unwrap_or(u64::MAX)
   }
 
@@ -225,6 +246,11 @@ impl TimeoutState {
     let elapsed = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
     if elapsed < earliest {
       return false;
+    }
+    if self.never_parks {
+      // Nothing can have given the budget time back, so the cached
+      // minimum is the whole answer.
+      return true;
     }
     // A run held at a debugger is not a run that is running away: give
     // each armed budget back every millisecond spent parked since it
@@ -287,6 +313,11 @@ pub async fn run_within<F: std::future::Future>(
   limit: Duration,
   fut: F,
 ) -> Result<F::Output, Timedout> {
+  if clock.never_parks() {
+    // The deadline cannot move, so there is nothing for the loop below
+    // to re-derive: one timer, one select, no clock reads per pass.
+    return tokio::time::timeout(limit, fut).await.map_err(|_| Timedout);
+  }
   let started = Instant::now();
   // The clock counts the whole process, so only what it gains from here
   // on belongs to this call -- otherwise work that runs after a long

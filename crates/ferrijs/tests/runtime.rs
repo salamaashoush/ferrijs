@@ -804,3 +804,74 @@ async fn a_console_sink_receives_every_run() {
   let seen = sink.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
   assert_eq!(seen, vec!["run 0", "run 1", "run 2"]);
 }
+
+#[tokio::test]
+async fn a_repeated_script_is_reused_without_changing_what_it_sees() {
+  let rt = plain().await;
+  // Same source three times: the second and third run the compiled
+  // arrow the first left behind. Each must still get its own bindings
+  // and the realm's current globals, which is what recompiling gave.
+  for expected in 1..=3 {
+    let run = rt
+      .eval_script(
+        "globalThis.n = (globalThis.n ?? 0) + 1; let local = 'fresh'; return [globalThis.n, local]",
+        &[],
+        RunOptions::default(),
+      )
+      .await;
+    assert_eq!(ok(&run), &serde_json::json!([expected, "fresh"]));
+  }
+  // Args are rebound per run, not baked into the cached function.
+  for i in 0..3 {
+    let run = rt
+      .eval_script("return args[0] * 2", &[serde_json::json!(i)], RunOptions::default())
+      .await;
+    assert_eq!(ok(&run), &serde_json::json!(i * 2));
+  }
+  // A different source is a different entry, not a stale hit.
+  let other = rt.eval_script("return 'other'", &[], RunOptions::default()).await;
+  assert_eq!(ok(&other), &serde_json::json!("other"));
+}
+
+#[tokio::test]
+async fn a_syntax_error_is_not_cached_and_reports_every_time() {
+  let rt = plain().await;
+  for _ in 0..3 {
+    let run = rt.eval_script("return (", &[], RunOptions::default()).await;
+    let err = run.err().expect("syntax error");
+    assert_eq!(err.kind, ScriptErrorKind::Syntax);
+  }
+  // The realm still works afterwards.
+  let ok_run = rt.eval_script("return 42", &[], RunOptions::default()).await;
+  assert_eq!(ok(&ok_run), &serde_json::json!(42));
+}
+
+#[tokio::test]
+async fn the_script_cache_can_be_turned_off() {
+  let rt = Runtime::builder().script_cache(0).build().await.expect("runtime");
+  for expected in 1..=3 {
+    let run = rt
+      .eval_script(
+        "globalThis.m = (globalThis.m ?? 0) + 1; return globalThis.m",
+        &[],
+        RunOptions::default(),
+      )
+      .await;
+    assert_eq!(ok(&run), &serde_json::json!(expected));
+  }
+}
+
+#[tokio::test]
+async fn the_script_cache_stays_within_its_bound() {
+  // Two slots, four distinct scripts: the table is emptied rather than
+  // grown, and every script still answers correctly.
+  let rt = Runtime::builder().script_cache(2).build().await.expect("runtime");
+  for round in 0..3 {
+    for i in 0..4 {
+      let run = rt
+        .eval_script(&format!("return {i} + 100"), &[], RunOptions::default())
+        .await;
+      assert_eq!(ok(&run), &serde_json::json!(i + 100), "round {round}, script {i}");
+    }
+  }
+}
