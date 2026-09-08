@@ -127,8 +127,8 @@ fn write_indentation(result: &mut String, indentation: Option<&str>, depth: usiz
 fn run_to_json<'js>(
     context: &mut StringifyContext<'_, 'js>,
     js_object: &Object<'js>,
+    to_json: &Function<'js>,
 ) -> Result<()> {
-    let to_json = js_object.get::<_, Function>(PredefinedAtom::ToJSON)?;
     let val: Value = to_json.call((This(js_object.clone()),))?;
 
     //only preserve indentation if we're returning nested data
@@ -211,7 +211,6 @@ fn write_primitive2<'js>(
     new_value: Option<Value<'js>>,
 ) -> Result<PrimitiveStatus<'js>> {
     let key = context.key;
-    let index = context.index;
     let include_keys_replacer = context.include_keys_replacer;
     let indentation = context.indentation;
     let depth = context.depth;
@@ -236,12 +235,16 @@ fn write_primitive2<'js>(
         ));
     }
 
-    if let Some(include_keys_replacer) = include_keys_replacer {
-        let key = get_key_or_index(context.itoa_buffer, key, index);
+    // The array form of `replacer` is the spec's PropertyList, and only
+    // SerializeJSONObject consults it: it names OBJECT KEYS. Matching it
+    // against the root, which has no key, dropped the whole document and
+    // returned undefined; matching it against an array element's index
+    // dropped every entry whose index was not itself in the list.
+    if let (Some(include_keys_replacer), Some(key)) = (include_keys_replacer, key) {
         if !include_keys_replacer.contains(key) {
             return Ok(PrimitiveStatus::Ignored);
         }
-    };
+    }
 
     if let Some(indentation) = indentation {
         write_indented_separator(context.result, key, add_comma, indentation, depth);
@@ -433,8 +436,16 @@ fn iterate<'js>(
     match elem.type_of() {
         Type::Object | Type::Exception | Type::Proxy => {
             let js_object = unsafe { elem.as_object().unwrap_unchecked() };
-            if js_object.contains_key(PredefinedAtom::ToJSON)? {
-                return run_to_json(context, js_object);
+            // `toJSON` is honoured only when it is CALLABLE. The spec's
+            // SerializeJSONProperty guards on IsCallable and serialises
+            // the object normally otherwise; taking mere presence as the
+            // signal and then converting to a `Function` turned
+            // `{toJSON: "x"}` into a TypeError instead of
+            // `{"toJSON":"x"}`. One `get` also replaces a `contains_key`
+            // followed by a second lookup.
+            let to_json: Value<'js> = js_object.get(PredefinedAtom::ToJSON)?;
+            if let Some(to_json) = to_json.as_function() {
+                return run_to_json(context, js_object, to_json);
             }
 
             //only start detect circular reference at this level

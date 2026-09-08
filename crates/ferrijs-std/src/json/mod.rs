@@ -13,6 +13,26 @@ pub mod stringify;
 use crate::json::parse::json_parse_string;
 use crate::json::stringify::json_stringify_replacer_space;
 
+/// Replace `JSON.parse` / `JSON.stringify` with this module's.
+///
+/// NOT called by [`crate::init`], and not ready to be. It is about a
+/// third faster than the engine's both ways, but measured against Node
+/// it still differs in ways that matter:
+///
+/// - `parse` assigns keys through `[[Set]]`, so `{"__proto__": {...}}`
+///   retargets the result's prototype rather than becoming an own
+///   property. For a runtime that parses untrusted JSON that is a
+///   prototype-pollution primitive, and it is the reason this is off.
+/// - `parse` ignores its `reviver` argument entirely.
+/// - `stringify` writes a hole or an `undefined` array element as
+///   nothing rather than `null`, which emits invalid JSON (`[1,,2]`).
+/// - `stringify` does not unwrap boxed primitives: `new Number(5)`
+///   serialises as `{}` where the spec says `5`.
+/// - `stringify` writes `-0` for negative zero (spec: `0`) and `1e21`
+///   where the spec's ToString gives `1e+21`.
+///
+/// `crates/ferrijs/tests/json_conformance.rs` is the set these came
+/// from; make it pass before turning this on.
 pub fn redefine_static_methods(ctx: &Ctx<'_>) -> Result<()> {
     let globals = ctx.globals();
     let json_module: Object = globals.get(PredefinedAtom::JSON)?;
