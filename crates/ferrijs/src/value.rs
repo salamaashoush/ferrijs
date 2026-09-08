@@ -215,94 +215,81 @@ fn f64_as_exact_i32(n: f64) -> Option<i32> {
 /// `ferrijs-serde` drives the deserializer: it invokes `toJSON()` /
 /// `valueOf()` (a returned `Date` still serialises as its ISO string),
 /// coerces whole f64 in the safe-integer range to `i64`, drops
-/// `undefined` / function / symbol, and renders non-finite as null. The
-/// value is deserialized into a small intermediate rather than straight
-/// into `serde_json::Value`: under `serde_json/arbitrary_precision`
-/// (which a host's bundler may enable workspace-wide) `Value`'s own
-/// `Deserialize` demands a private number representation that a
-/// non-`serde_json` deserializer cannot provide, and every numeric or
-/// array result would collapse to `null`.
+/// `undefined` / function / symbol, and renders non-finite as null.
+/// [`JsonValue`] is what receives it, and says there why
+/// `serde_json::Value`'s own `Deserialize` cannot.
 #[must_use]
 pub fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  ferrijs_serde::from_value::<JsonInter>(value)
-    .ok()
-    .map(JsonInter::into_json)
+  ferrijs_serde::from_value::<JsonValue>(value).ok().map(|v| v.0)
 }
 
-/// A plain-serde mirror of a JSON value; `into_json` rebuilds a
-/// `serde_json::Value` via explicit constructors.
-enum JsonInter {
-  Null,
-  Bool(bool),
-  I64(i64),
-  U64(u64),
-  F64(f64),
-  Str(String),
-  Arr(Vec<JsonInter>),
-  Obj(Vec<(String, JsonInter)>),
-}
+/// A `serde_json::Value` built through explicit constructors.
+///
+/// `serde_json::Value`'s own `Deserialize` cannot be used: under
+/// `serde_json/arbitrary_precision` (which a host's bundler may enable
+/// workspace-wide -- rolldown does) it demands a private number
+/// representation that a non-`serde_json` deserializer cannot provide,
+/// and every numeric or array result would collapse to `null`. So the
+/// visitor below builds the same value out of `Number::from` and
+/// `Map`, which are immune.
+///
+/// It builds the final value directly rather than an intermediate
+/// mirror: filling a `Vec<(String, _)>` per object and a `Vec<_>` per
+/// array only to walk them again cost an allocation and a move per
+/// container for no gain.
+struct JsonValue(serde_json::Value);
 
-impl JsonInter {
-  fn into_json(self) -> serde_json::Value {
-    use serde_json::Value;
-    match self {
-      Self::Null => Value::Null,
-      Self::Bool(b) => Value::Bool(b),
-      Self::I64(n) => Value::Number(n.into()),
-      Self::U64(n) => Value::Number(n.into()),
-      Self::F64(f) => serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number),
-      Self::Str(s) => Value::String(s),
-      Self::Arr(a) => Value::Array(a.into_iter().map(Self::into_json).collect()),
-      Self::Obj(o) => Value::Object(o.into_iter().map(|(k, v)| (k, v.into_json())).collect()),
-    }
-  }
-}
-
-impl<'de> serde::Deserialize<'de> for JsonInter {
+impl<'de> serde::Deserialize<'de> for JsonValue {
   fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
     struct V;
     impl<'de> serde::de::Visitor<'de> for V {
-      type Value = JsonInter;
+      type Value = JsonValue;
       fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("any JSON value")
       }
-      fn visit_unit<E>(self) -> Result<JsonInter, E> {
-        Ok(JsonInter::Null)
+      fn visit_unit<E>(self) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::Null))
       }
-      fn visit_none<E>(self) -> Result<JsonInter, E> {
-        Ok(JsonInter::Null)
+      fn visit_none<E>(self) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::Null))
       }
-      fn visit_bool<E>(self, v: bool) -> Result<JsonInter, E> {
-        Ok(JsonInter::Bool(v))
+      fn visit_bool<E>(self, v: bool) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::Bool(v)))
       }
-      fn visit_i64<E>(self, v: i64) -> Result<JsonInter, E> {
-        Ok(JsonInter::I64(v))
+      fn visit_i64<E>(self, v: i64) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::Number(v.into())))
       }
-      fn visit_u64<E>(self, v: u64) -> Result<JsonInter, E> {
-        Ok(JsonInter::U64(v))
+      fn visit_u64<E>(self, v: u64) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::Number(v.into())))
       }
-      fn visit_f64<E>(self, v: f64) -> Result<JsonInter, E> {
-        Ok(JsonInter::F64(v))
+      fn visit_f64<E>(self, v: f64) -> Result<JsonValue, E> {
+        Ok(JsonValue(
+          serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number),
+        ))
       }
-      fn visit_str<E>(self, v: &str) -> Result<JsonInter, E> {
-        Ok(JsonInter::Str(v.to_owned()))
+      fn visit_str<E>(self, v: &str) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::String(v.to_owned())))
       }
-      fn visit_string<E>(self, v: String) -> Result<JsonInter, E> {
-        Ok(JsonInter::Str(v))
+      fn visit_string<E>(self, v: String) -> Result<JsonValue, E> {
+        Ok(JsonValue(serde_json::Value::String(v)))
       }
-      fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<JsonInter, A::Error> {
-        let mut out = Vec::new();
-        while let Some(e) = a.next_element()? {
+      fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<JsonValue, A::Error> {
+        let mut out = Vec::with_capacity(a.size_hint().unwrap_or(0));
+        while let Some(JsonValue(e)) = a.next_element()? {
           out.push(e);
         }
-        Ok(JsonInter::Arr(out))
+        Ok(JsonValue(serde_json::Value::Array(out)))
       }
-      fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<JsonInter, A::Error> {
-        let mut out = Vec::new();
-        while let Some((k, v)) = m.next_entry()? {
-          out.push((k, v));
+      fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<JsonValue, A::Error> {
+        // Collected then built in bulk, not inserted one at a time:
+        // `serde_json::Map` is a `BTreeMap`, and building one from an
+        // iterator sorts once and fills the nodes directly, where N
+        // inserts each pay a tree descent.
+        let mut pairs: Vec<(String, serde_json::Value)> = Vec::with_capacity(m.size_hint().unwrap_or(0));
+        while let Some((k, JsonValue(v))) = m.next_entry::<String, JsonValue>()? {
+          pairs.push((k, v));
         }
-        Ok(JsonInter::Obj(out))
+        Ok(JsonValue(serde_json::Value::Object(pairs.into_iter().collect())))
       }
     }
     d.deserialize_any(V)
