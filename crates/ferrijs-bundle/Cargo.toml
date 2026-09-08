@@ -14,7 +14,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-ferrijs = { path = "../ferrijs", version = "0.2.0", default-features = false }
+ferrijs = { path = "../ferrijs", version = "0.2.1", default-features = false }
 rquickjs = { workspace = true }
 # rolldown (built on oxc) resolves the whole import graph including
 # node_modules, transpiles .ts/.tsx, tree-shakes, and emits one ESM chunk.

@@ -740,22 +740,18 @@ pub(crate) trait BodyMixin<'js> {
 }
 
 /// Bytes behind a stream chunk (`Uint8Array`/`ArrayBuffer`/string).
-// Reading a JS buffer's bytes is `unsafe` from rquickjs 0.13: the slice
-// aliases engine memory and no JavaScript may run while it is alive.
-// Every read here is copied out on the following line, so the borrow
-// never spans a call back into script.
+// 0.13 forbids running JS while a buffer borrow is alive; these copy out
+// immediately.
 #[allow(unsafe_code)]
 fn chunk_bytes(v: &Value<'_>) -> Vec<u8> {
   if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
     return s.into_bytes();
   }
   if let Ok(ta) = rquickjs::TypedArray::<u8>::from_value(v.clone()) {
-    // SAFETY: copied out on the next line; nothing between runs JS.
     let b: &[u8] = unsafe { ta.as_bytes() }.unwrap_or_default();
     return b.to_vec();
   }
   if let Some(ab) = rquickjs::ArrayBuffer::from_value(v.clone())
-    // SAFETY: copied out in the body below; nothing between runs JS.
     && let Some(b) = unsafe { ab.as_bytes() }
   {
     return b.to_vec();

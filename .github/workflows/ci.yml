@@ -99,8 +99,9 @@ jobs:
             || echo "Basics green"
 
   # ---------------------------------------------------------------------------
-  # The suite. Both hosts (ferridriver, ferrimock) run on Linux and macOS, so
-  # those are the two platforms the runtime has to be green on.
+  # The suite. Linux and macOS are where the hosts run; Windows is here
+  # because ferrimock ships a Windows CLI, and a `cfg(windows)` dependency
+  # this crate forgot to declare only failed once that CLI was built.
   # ---------------------------------------------------------------------------
   test:
     name: Tests (${{ matrix.os }})
@@ -110,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
         with:

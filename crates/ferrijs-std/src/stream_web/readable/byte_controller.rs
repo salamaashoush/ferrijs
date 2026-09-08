@@ -868,7 +868,7 @@ impl<'js> ReadableByteStreamController<'js> {
         // Let cloneResult be CloneArrayBuffer(buffer, byteOffset, byteLength, %ArrayBuffer%).
         let clone_result = match ArrayBuffer::new_copy(
             ctx.clone(),
-            // SAFETY: as in `tee.rs` -- `new_copy` cannot run user script.
+            // SAFETY: `new_copy` cannot run user script.
             &unsafe { buffer.as_bytes() }.expect(
                 "ReadableByteStreamControllerEnqueueClonedChunkToQueue called on detached buffer",
             )[byte_offset..byte_offset + byte_length],
@@ -1952,8 +1952,7 @@ impl<'js> ReadableStreamBYOBRequest<'js> {
         drop(byob_request);
 
         // If ! IsDetachedBuffer(this.[[view]].[[ArrayBuffer]]) is true, throw a TypeError exception.
-        // SAFETY: a detachment probe -- the slice is never named, so no
-        // borrow outlives the call.
+        // SAFETY: a detachment probe; the slice is never named.
         if unsafe { buffer.as_bytes() }.is_none() {
             return Err(Exception::throw_type(
                 &ctx,
@@ -2001,8 +2000,7 @@ impl<'js> ReadableStreamBYOBRequest<'js> {
         let (buffer, _, _) = view.get_array_buffer()?;
 
         // If ! IsDetachedBuffer(view.[[ViewedArrayBuffer]]) is true, throw a TypeError exception.
-        // SAFETY: a detachment probe -- the slice is never named, so no
-        // borrow outlives the call.
+        // SAFETY: a detachment probe; the slice is never named.
         if unsafe { buffer.as_bytes() }.is_none() {
             return Err(Exception::throw_type(
                 &ctx,

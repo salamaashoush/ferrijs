@@ -205,8 +205,7 @@ impl<'js> ReadableStreamBYOBReader<'js> {
             }
 
             // If ! IsDetachedBuffer(view.[[ViewedArrayBuffer]]) is true, return a promise rejected with a TypeError exception.
-            // SAFETY: a detachment probe -- the slice is never named, so no
-            // borrow outlives the call.
+            // SAFETY: a detachment probe; the slice is never named.
             if unsafe { buffer.as_bytes() }.is_none() {
                 return promise_rejected_with_constructor(
                     &reader.generic.constructor_type_error,

@@ -245,11 +245,8 @@ fn concat<'js>(ctx: Ctx<'js>, list: Array<'js>, max_length: Opt<usize>) -> Resul
     let mut length;
     for value in list.iter::<Object>() {
         let typed_array = TypedArray::<u8>::from_object(value?)?;
-        // SAFETY: 0.13 requires that no JS run while the slice is alive.
-        // `bytes_ref` is copied into `bytes` and dropped before the loop
-        // advances the iterator, which is the only thing here that can
-        // re-enter JS. A detached buffer reads as empty and is skipped
-        // by the `length == 0` arm below.
+        // SAFETY: copied before the iterator advances, which is the only
+        // thing here that re-enters JS.
         let bytes_ref: &[u8] = unsafe { typed_array.as_bytes() }.unwrap_or_default();
 
         length = bytes_ref.len();
@@ -442,9 +439,8 @@ fn to_string(
     end: Opt<i32>,
 ) -> Result<String> {
     let typed_array = TypedArray::<u8>::from_object(this.0)?;
-    // SAFETY: nothing between here and the last use of `bytes` runs JS --
-    // the slicing is arithmetic and the encoder is pure Rust. `or_throw`
-    // raises an exception rather than calling back into script.
+    // SAFETY: the slicing and the encoder are pure Rust; nothing here
+    // re-enters script.
     let bytes: &[u8] = unsafe { typed_array.as_bytes() }.unwrap_or_default();
 
     let start = start

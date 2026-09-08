@@ -164,6 +164,14 @@ tracing = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# `utils/signals.rs` calls OpenProcess/TerminateProcess/CloseHandle on
+# Windows; the same declaration upstream llrt carries.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+], default-features = false }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

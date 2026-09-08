@@ -19,7 +19,7 @@ use super::throw_named;
 /// detached or the view is out of bounds.
 pub fn buffer_source_bytes(ctx: &Ctx<'_>, value: &Value<'_>) -> rquickjs::Result<Vec<u8>> {
   if let Some(ab) = ArrayBuffer::from_value(value.clone()) {
-    // SAFETY: copied out immediately; nothing runs JS in between.
+    // SAFETY: copied out immediately.
     return unsafe { ab.as_bytes() }
       .map(<[u8]>::to_vec)
       .ok_or_else(|| throw_named(ctx, "TypeError", "detached ArrayBuffer"));
@@ -29,8 +29,7 @@ pub fn buffer_source_bytes(ctx: &Ctx<'_>, value: &Value<'_>) -> rquickjs::Result
     if let Ok(ab) = buffer {
       let offset: usize = obj.get("byteOffset")?;
       let len: usize = obj.get("byteLength")?;
-      // SAFETY: both property reads happen above; from here to the
-      // `to_vec` below nothing re-enters script.
+      // SAFETY: the property reads happen above; the copy follows.
       let bytes = unsafe { ab.as_bytes() }
         .ok_or_else(|| throw_named(ctx, "TypeError", "detached ArrayBuffer"))?;
       return bytes
