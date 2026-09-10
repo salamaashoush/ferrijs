@@ -43,6 +43,7 @@ pub struct MapSerializer<'se, 'js> {
     value: Object<'js>,
     /** current map key, will be left `None` for structs */
     key: Option<Value<'js>>,
+    json_number: bool,
 }
 
 pub struct StructVariantSerializer<'se, 'js> {
@@ -80,6 +81,7 @@ impl<'se, 'js> MapSerializer<'se, 'js> {
             ser,
             value,
             key: None,
+            json_number: false,
         })
     }
 }
@@ -228,8 +230,11 @@ impl<'js, 'se> ser::Serializer for &'se mut Serializer<'js> {
         MapSerializer::new(self)
     }
 
-    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
-        MapSerializer::new(self)
+    fn serialize_struct(self, name: &'static str, _len: usize) -> Result<Self::SerializeStruct> {
+        let mut serializer = MapSerializer::new(self)?;
+        // serde_json's arbitrary_precision feature serializes numbers as tagged structs.
+        serializer.json_number = name == "$serde_json::private::Number";
+        Ok(serializer)
     }
 
     fn serialize_struct_variant(
@@ -390,7 +395,16 @@ impl<'se, 'js> ser::SerializeStruct for MapSerializer<'se, 'js> {
     }
 
     fn end(self) -> Result<Self::Ok> {
-        Ok(self.value.into())
+        if self.json_number {
+            let text: alloc::string::String = self.value.get("$serde_json::private::Number").map_err(Error::new)?;
+            let value = self.ser.context.json_parse(text).map_err(Error::new)?;
+            if !value.is_number() {
+                return Err(<Error as ser::Error>::custom("invalid serde_json number"));
+            }
+            Ok(value)
+        } else {
+            Ok(self.value.into())
+        }
     }
 }
 
@@ -576,6 +590,18 @@ mod tests {
                 Ok(value.is_string())
             })
         }
+    }
+
+    #[test]
+    fn json_number_marker_in_an_ordinary_map_remains_an_object() {
+        let rt = Runtime::default();
+        rt.context().with(|cx| {
+            let mut serializer = ValueSerializer::from_context(cx.clone()).unwrap();
+            let map = std::collections::BTreeMap::from([("$serde_json::private::Number", "1")]);
+            let value = map.serialize(&mut serializer).unwrap();
+            assert!(value.is_object());
+            assert_eq!(json_stringify(cx.clone(), value), r#"{"$serde_json::private::Number":"1"}"#);
+        });
     }
 
     #[test]

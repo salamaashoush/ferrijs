@@ -9,7 +9,7 @@
 use rquickjs::function::{Async, Func, Opt, Rest};
 use rquickjs::{Ctx, Function, Object, Promise, Result, Value};
 
-use super::deep_equal::{Mode, deep_equal, loose_equal, strict_equal};
+use super::deep_equal::{deep_equal, loose_equal, strict_equal, Mode};
 use super::inspect::Inspector;
 
 fn render(value: &Value<'_>) -> String {
@@ -105,7 +105,15 @@ fn compare<'js>(
 
 fn equal<'js>(ctx: Ctx<'js>, actual: Value<'js>, expected: Value<'js>, message: Opt<Value<'js>>) -> Result<()> {
   let passed = loose_equal(&actual, &expected);
-  compare(&ctx, actual, expected, message, passed, "==", "Expected values to be loosely equal:")
+  compare(
+    &ctx,
+    actual,
+    expected,
+    message,
+    passed,
+    "==",
+    "Expected values to be loosely equal:",
+  )
 }
 
 fn not_equal<'js>(ctx: Ctx<'js>, actual: Value<'js>, expected: Value<'js>, message: Opt<Value<'js>>) -> Result<()> {
@@ -173,7 +181,12 @@ fn not_deep_eq<'js>(ctx: Ctx<'js>, actual: Value<'js>, expected: Value<'js>, mes
   )
 }
 
-fn deep_strict_eq<'js>(ctx: Ctx<'js>, actual: Value<'js>, expected: Value<'js>, message: Opt<Value<'js>>) -> Result<()> {
+fn deep_strict_eq<'js>(
+  ctx: Ctx<'js>,
+  actual: Value<'js>,
+  expected: Value<'js>,
+  message: Opt<Value<'js>>,
+) -> Result<()> {
   let passed = deep_equal(&actual, &expected, Mode::Strict)?;
   compare(
     &ctx,
@@ -256,8 +269,14 @@ fn thrown_matches<'js>(ctx: &Ctx<'js>, error: &Value<'js>, expected: &Value<'js>
   };
 
   if expected.is_function() {
-    let instance_of: Function<'js> = ctx.eval("(e, C) => e instanceof C")?;
-    return instance_of.call((error.clone(), expected.clone()));
+    let matches: Function<'js> = ctx.eval(
+      "(error, expected) => {
+        if (expected.prototype !== undefined && error instanceof expected) return true;
+        if (Object.prototype.isPrototypeOf.call(Error, expected)) return false;
+        return expected.call({}, error) === true;
+      }",
+    )?;
+    return matches.call((error.clone(), expected.clone()));
   }
 
   if regexp_source_present(expected_obj)? {
@@ -304,7 +323,7 @@ fn throws<'js>(ctx: Ctx<'js>, body: Function<'js>, rest: Rest<Value<'js>>) -> Re
         }
       }
       Ok(())
-    },
+    }
     Ok(_) => Err(fail_with(
       &ctx,
       message,
@@ -330,7 +349,7 @@ fn does_not_throw<'js>(ctx: Ctx<'js>, body: Function<'js>, rest: Rest<Value<'js>
         Value::new_undefined(ctx.clone()),
         "doesNotThrow",
       ))
-    },
+    }
   }
 }
 
@@ -363,7 +382,7 @@ async fn rejects<'js>(ctx: Ctx<'js>, subject: Value<'js>, rest: Rest<Value<'js>>
         }
       }
       Ok(())
-    },
+    }
     Ok(()) => Err(fail_with(
       &ctx,
       message,
@@ -389,7 +408,7 @@ async fn does_not_reject<'js>(ctx: Ctx<'js>, subject: Value<'js>, rest: Rest<Val
         Value::new_undefined(ctx.clone()),
         "doesNotReject",
       ))
-    },
+    }
   }
 }
 

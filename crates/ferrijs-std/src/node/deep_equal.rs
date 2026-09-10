@@ -33,6 +33,9 @@ pub fn deep_equal<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode) -> rquickjs::
 /// not match `-0`), identity on everything else.
 #[must_use]
 pub fn strict_equal<'js>(a: &Value<'js>, b: &Value<'js>) -> bool {
+  if a.is_number() && b.is_number() {
+    return number_eq(a, b, Mode::Strict);
+  }
   if a.type_of() != b.type_of() {
     return false;
   }
@@ -65,6 +68,9 @@ pub fn loose_equal<'js>(a: &Value<'js>, b: &Value<'js>) -> bool {
 fn equal_at<'js>(a: &Value<'js>, b: &Value<'js>, mode: Mode, depth: usize) -> rquickjs::Result<bool> {
   if depth > MAX_DEPTH {
     return Ok(false);
+  }
+  if a.is_number() && b.is_number() {
+    return Ok(number_eq(a, b, mode));
   }
   if a.type_of() != b.type_of() {
     // `1 == '1'` under the loose flavour; nothing else crosses types.

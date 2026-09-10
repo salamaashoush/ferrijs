@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use either::Either;
 use crate::buffer::Buffer;
-use crate::utils::{object::ObjectExt, result::ResultExt};
+use crate::node::system_error;
+use crate::utils::object::ObjectExt;
 use rquickjs::{function::Opt, Ctx, Error, FromJs, IntoJs, Result, Value};
 use tokio::fs;
 
@@ -13,7 +14,7 @@ pub async fn read_file(
 ) -> Result<Value<'_>> {
     let bytes = fs::read(&path)
         .await
-        .or_throw_msg(&ctx, &["Can't read \"", &path, "\""].concat())?;
+        .map_err(|error| read_error(&ctx, &error, &path))?;
 
     handle_read_file_bytes(&ctx, options, bytes)
 }
@@ -24,9 +25,14 @@ pub fn read_file_sync(
     options: Opt<Either<String, ReadFileOptions>>,
 ) -> Result<Value<'_>> {
     let bytes =
-        std::fs::read(&path).or_throw_msg(&ctx, &["Can't read \"", &path, "\""].concat())?;
+        std::fs::read(&path).map_err(|error| read_error(&ctx, &error, &path))?;
 
     handle_read_file_bytes(&ctx, options, bytes)
+}
+
+fn read_error(ctx: &Ctx<'_>, error: &std::io::Error, path: &str) -> Error {
+    let syscall = if error.raw_os_error() == Some(libc::EISDIR) { "read" } else { "open" };
+    system_error::throw(ctx, error, syscall, path)
 }
 
 pub(crate) fn handle_read_file_bytes<'a>(

@@ -38,6 +38,10 @@ nightly-only); pedantic clippy is off for the same reason.
    `as_value()` instead of cloning the object to compare. Together these
    halve `value_to_json`.
 
+4. `ser.rs`: recognize serde_json's tagged arbitrary-precision numbers
+   when serializing structs and convert them to native JS numbers.
+   Ordinary maps with the same key remain objects.
+
 ## Re-syncing
 
 ```

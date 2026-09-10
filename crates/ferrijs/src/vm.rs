@@ -27,6 +27,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use rquickjs::{AsyncContext, Ctx};
+use tracing::Instrument;
 
 use crate::error::ScriptError;
 
@@ -52,11 +53,15 @@ impl VmHandle {
     F: for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output = R> + Send + 'js>> + Send + 'static,
   {
     let (tx, rx) = tokio::sync::oneshot::channel::<R>();
+    let span = tracing::Span::current();
     let job: VmJob = Box::new(move |ctx| {
-      Box::pin(async move {
-        let r = f(ctx).await;
-        let _ = tx.send(r);
-      })
+      Box::pin(
+        async move {
+          let r = f(ctx).await;
+          let _ = tx.send(r);
+        }
+        .instrument(span),
+      )
     });
     self
       .tx

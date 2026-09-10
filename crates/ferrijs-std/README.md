@@ -493,3 +493,13 @@ the extension that needs it.
     value (`typeof e === "unknown"`). The thrown value is now taken with
     `ctx.catch()` at that point and re-thrown inside the future, where
     the rejection is built. Upstream candidate.
+
+34. **`fs/access.rs` — preserve filesystem error identity.** Sync and
+    async access failures use `node::system_error` to retain `code`,
+    `errno`, `syscall`, and `path`. Previously every metadata failure
+    became a plain missing-file message, preventing callers from
+    distinguishing missing paths from permission or directory errors.
+
+35. **`fs/read_file.rs` — preserve read and open errors.** Sync and
+    async reads retain `code`, `errno`, `syscall`, and `path` through
+    `node::system_error`, including `EISDIR` for reading a directory.

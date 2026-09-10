@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::fs::Metadata;
 
-use crate::utils::result::ResultExt;
+use crate::node::system_error;
 use rquickjs::{prelude::Opt, Ctx, Exception, Result};
 use tokio::fs;
 
@@ -10,19 +10,16 @@ use tokio::fs;
 use super::{CONSTANT_F_OK, CONSTANT_R_OK, CONSTANT_W_OK, CONSTANT_X_OK};
 
 pub async fn access(ctx: Ctx<'_>, path: String, mode: Opt<u32>) -> Result<()> {
-    let metadata = fs::metadata(&path).await.or_throw_msg(
-        &ctx,
-        &["No such file or directory \"", &path, "\""].concat(),
-    )?;
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|error| system_error::throw(&ctx, &error, "access", &path))?;
 
     verify_metadata(&ctx, mode, metadata)
 }
 
 pub fn access_sync(ctx: Ctx<'_>, path: String, mode: Opt<u32>) -> Result<()> {
-    let metadata = std::fs::metadata(path.clone()).or_throw_msg(
-        &ctx,
-        &["No such file or directory \"", &path, "\""].concat(),
-    )?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| system_error::throw(&ctx, &error, "access", &path))?;
 
     verify_metadata(&ctx, mode, metadata)
 }
