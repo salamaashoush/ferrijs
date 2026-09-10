@@ -183,7 +183,13 @@ async fn url_process_and_timers_modules() {
   assert_eq!(value["archesAgree"], serde_json::Value::Bool(true));
   assert_eq!(
     value["platform"],
-    if cfg!(target_os = "macos") { "darwin" } else { "linux" },
+    if cfg!(target_os = "macos") {
+      "darwin"
+    } else if cfg!(target_os = "windows") {
+      "win32"
+    } else {
+      "linux"
+    },
     "Node's spelling, not Rust's"
   );
   assert_eq!(value["timerIsGlobal"], serde_json::Value::Bool(true));

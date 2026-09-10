@@ -86,8 +86,15 @@ fn assert_identity(value: &serde_json::Value) {
     value["endianness"],
     if cfg!(target_endian = "little") { "LE" } else { "BE" }
   );
-  assert_eq!(value["eol"], "\n");
-  assert_eq!(value["devNull"], "/dev/null");
+  assert_eq!(value["eol"], if cfg!(target_os = "windows") { "\r\n" } else { "\n" });
+  assert_eq!(
+    value["devNull"],
+    if cfg!(target_os = "windows") {
+      r"\\.\nul"
+    } else {
+      "/dev/null"
+    }
+  );
   assert_eq!(
     value["arch"],
     match std::env::consts::ARCH {
@@ -114,9 +121,16 @@ fn assert_identity(value: &serde_json::Value) {
     "hostname: {value:?}"
   );
 
+  // Windows has no HOME; Node reads USERPROFILE there, and so does the `home`
+  // crate this runtime uses.
+  let home_var = if cfg!(target_os = "windows") {
+    "USERPROFILE"
+  } else {
+    "HOME"
+  };
   assert_eq!(
     value["homedir"].as_str(),
-    std::env::var("HOME").ok().as_deref(),
+    std::env::var(home_var).ok().as_deref(),
     "homedir matches the environment"
   );
   assert_eq!(
