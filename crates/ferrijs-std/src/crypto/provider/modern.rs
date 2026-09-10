@@ -13,6 +13,12 @@ use ml_kem::{
     B32 as MlKemRandomness,
 };
 
+use openssl::bn::{BigNum, BigNumContext};
+use openssl::derive::Deriver;
+use openssl::ec::{EcGroup, EcKey, EcPoint, PointConversionForm};
+use openssl::nid::Nid;
+use openssl::pkey::{Id, PKey, Private, Public};
+
 use super::{CryptoError, HybridKemVariant, MlDsaVariant, MlKemVariant};
 
 trait MlDsaParameterSet: MlDsaParams + AssociatedAlgorithmIdentifier<Params = AnyRef<'static>> {}
@@ -391,10 +397,11 @@ pub(crate) fn export_ml_kem_private_key_pkcs8(
     })
 }
 
+// Ec carries its curve so decapsulation can parse the peer point; X25519 is
+// kept apart because its shared secret needs the all-zero rejection.
 enum TraditionalPrivateKey {
-    P256(p256::SecretKey),
-    X25519(x25519_dalek::StaticSecret),
-    P384(p384::SecretKey),
+    Ec(Nid, PKey<Private>),
+    X25519(PKey<Private>),
 }
 
 struct HybridKeyPair {
@@ -417,24 +424,92 @@ fn shake256(input: &[u8], output_length: usize) -> Vec<u8> {
     output
 }
 
-fn p256_private_key(seed: &[u8]) -> Result<p256::SecretKey, CryptoError> {
-    seed.as_chunks::<32>()
-        .0
-        .iter()
-        .find_map(|candidate| p256::SecretKey::from_slice(candidate).ok())
-        .ok_or(CryptoError::OperationFailed(Some(
-            "P-256 rejection sampling failed".into(),
-        )))
+// The traditional half of a hybrid key is rejection-sampled from the SHAKE
+// expansion: the first fixed-width chunk that is a valid scalar wins. A scalar
+// is valid when 0 < d < n, which is the same test `SecretKey::from_slice` made
+// before this moved to OpenSSL, so derived keys are unchanged.
+fn ec_private_key_from_seed(
+    nid: Nid,
+    chunk_len: usize,
+    seed: &[u8],
+) -> Result<PKey<Private>, CryptoError> {
+    let group = EcGroup::from_curve_name(nid).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
+    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
+    let mut order = BigNum::new().map_err(|_| CryptoError::OperationFailed(None))?;
+    group
+        .order(&mut order, &mut ctx)
+        .map_err(|_| CryptoError::OperationFailed(None))?;
+
+    for chunk in seed.chunks_exact(chunk_len) {
+        let Ok(candidate) = BigNum::from_slice(chunk) else {
+            continue;
+        };
+        if candidate.num_bits() == 0 || candidate >= order {
+            continue;
+        }
+        let mut point = EcPoint::new(&group).map_err(|_| CryptoError::OperationFailed(None))?;
+        if point
+            .mul_generator2(&group, &candidate, &mut ctx)
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(key) = EcKey::from_private_components(&group, &candidate, &point) else {
+            continue;
+        };
+        return PKey::from_ec_key(key).map_err(|_| CryptoError::OperationFailed(None));
+    }
+    Err(CryptoError::OperationFailed(Some(
+        "hybrid KEM traditional key rejection sampling failed".into(),
+    )))
 }
 
-fn p384_private_key(seed: &[u8]) -> Result<p384::SecretKey, CryptoError> {
-    seed.as_chunks::<48>()
-        .0
-        .iter()
-        .find_map(|candidate| p384::SecretKey::from_slice(candidate).ok())
-        .ok_or(CryptoError::OperationFailed(Some(
-            "P-384 rejection sampling failed".into(),
-        )))
+fn ec_public_point(key: &PKey<Private>) -> Result<Vec<u8>, CryptoError> {
+    let ec = key.ec_key().map_err(|_| CryptoError::InvalidKey(None))?;
+    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
+    ec.public_key()
+        .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED, &mut ctx)
+        .map_err(|_| CryptoError::OperationFailed(None))
+}
+
+fn ec_peer_key(nid: Nid, point: &[u8]) -> Result<PKey<Public>, CryptoError> {
+    let group = EcGroup::from_curve_name(nid).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
+    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
+    let point =
+        EcPoint::from_bytes(&group, point, &mut ctx).map_err(|_| CryptoError::InvalidKey(None))?;
+    let key = EcKey::from_public_key(&group, &point).map_err(|_| CryptoError::InvalidKey(None))?;
+    PKey::from_ec_key(key).map_err(|_| CryptoError::InvalidKey(None))
+}
+
+fn agree(private_key: &PKey<Private>, peer: &PKey<Public>) -> Result<Vec<u8>, CryptoError> {
+    let mut deriver = Deriver::new(private_key).map_err(|_| CryptoError::OperationFailed(None))?;
+    deriver
+        .set_peer(peer)
+        .map_err(|_| CryptoError::InvalidKey(None))?;
+    deriver
+        .derive_to_vec()
+        .map_err(|_| CryptoError::OperationFailed(None))
+}
+
+// RFC 7748 says to reject an all-zero X25519 secret, which is what a
+// small-order peer point produces.
+fn reject_all_zero(shared: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+    if shared.iter().all(|byte| *byte == 0) {
+        return Err(CryptoError::OperationFailed(None));
+    }
+    Ok(shared)
+}
+
+fn x25519_key_from_seed(seed: &[u8]) -> Result<PKey<Private>, CryptoError> {
+    PKey::private_key_from_raw_bytes(seed, Id::X25519).map_err(|_| CryptoError::InvalidKey(None))
+}
+
+fn hybrid_curve(variant: HybridKemVariant) -> Option<Nid> {
+    match variant {
+        HybridKemVariant::MlKem768P256 => Some(Nid::X9_62_PRIME256V1),
+        HybridKemVariant::MlKem1024P384 => Some(Nid::SECP384R1),
+        HybridKemVariant::MlKem768X25519 => None,
+    }
 }
 
 fn derive_hybrid_key_pair(
@@ -453,26 +528,19 @@ fn derive_hybrid_key_pair(
     let (pq_seed, traditional_seed) = expanded.split_at(64);
     let pq_public_key = ml_kem_public_key(variant.ml_kem_variant(), pq_seed)?;
 
-    let (traditional_private_key, traditional_public_key) = match variant {
-        HybridKemVariant::MlKem768P256 => {
-            let private_key = p256_private_key(traditional_seed)?;
-            let public_key = private_key.public_key().to_sec1_bytes().to_vec();
-            (TraditionalPrivateKey::P256(private_key), public_key)
+    let (traditional_private_key, traditional_public_key) = match hybrid_curve(variant) {
+        Some(nid) => {
+            let chunk_len = if nid == Nid::X9_62_PRIME256V1 { 32 } else { 48 };
+            let private_key = ec_private_key_from_seed(nid, chunk_len, traditional_seed)?;
+            let public_key = ec_public_point(&private_key)?;
+            (TraditionalPrivateKey::Ec(nid, private_key), public_key)
         },
-        HybridKemVariant::MlKem768X25519 => {
-            let private_key = x25519_dalek::StaticSecret::from(
-                <[u8; 32]>::try_from(traditional_seed)
-                    .map_err(|_| CryptoError::OperationFailed(None))?,
-            );
-            let public_key = x25519_dalek::PublicKey::from(&private_key)
-                .as_bytes()
-                .to_vec();
+        None => {
+            let private_key = x25519_key_from_seed(traditional_seed)?;
+            let public_key = private_key
+                .raw_public_key()
+                .map_err(|_| CryptoError::OperationFailed(None))?;
             (TraditionalPrivateKey::X25519(private_key), public_key)
-        },
-        HybridKemVariant::MlKem1024P384 => {
-            let private_key = p384_private_key(traditional_seed)?;
-            let public_key = private_key.public_key().to_sec1_bytes().to_vec();
-            (TraditionalPrivateKey::P384(private_key), public_key)
         },
     };
 
@@ -519,48 +587,31 @@ fn traditional_encapsulate(
     variant: HybridKemVariant,
     public_key: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    match variant {
-        HybridKemVariant::MlKem768P256 => {
-            let recipient = p256::PublicKey::from_sec1_bytes(public_key)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-            let ephemeral = p256_private_key(&crate::crypto::random_byte_array(128))?;
-            let ciphertext = ephemeral.public_key().to_sec1_bytes().to_vec();
-            let shared_key = p256::elliptic_curve::ecdh::diffie_hellman(
-                ephemeral.to_nonzero_scalar(),
-                recipient.as_affine(),
-            )
-            .raw_secret_bytes()
-            .to_vec();
+    match hybrid_curve(variant) {
+        Some(nid) => {
+            let recipient = ec_peer_key(nid, public_key)?;
+            let (chunk_len, seed_len) = if nid == Nid::X9_62_PRIME256V1 {
+                (32, 128)
+            } else {
+                (48, 48)
+            };
+            let ephemeral = ec_private_key_from_seed(
+                nid,
+                chunk_len,
+                &crate::crypto::random_byte_array(seed_len),
+            )?;
+            let ciphertext = ec_public_point(&ephemeral)?;
+            let shared_key = agree(&ephemeral, &recipient)?;
             Ok((ciphertext, shared_key))
         },
-        HybridKemVariant::MlKem768X25519 => {
-            let recipient = x25519_dalek::PublicKey::from(
-                <[u8; 32]>::try_from(public_key).map_err(|_| CryptoError::InvalidKey(None))?,
-            );
-            let ephemeral = x25519_dalek::StaticSecret::from(
-                <[u8; 32]>::try_from(crate::crypto::random_byte_array(32))
-                    .map_err(|_| CryptoError::OperationFailed(None))?,
-            );
-            let ciphertext = x25519_dalek::PublicKey::from(&ephemeral)
-                .as_bytes()
-                .to_vec();
-            let shared_key = ephemeral.diffie_hellman(&recipient);
-            if shared_key.as_bytes().iter().all(|byte| *byte == 0) {
-                return Err(CryptoError::OperationFailed(None));
-            }
-            Ok((ciphertext, shared_key.as_bytes().to_vec()))
-        },
-        HybridKemVariant::MlKem1024P384 => {
-            let recipient = p384::PublicKey::from_sec1_bytes(public_key)
+        None => {
+            let recipient = PKey::public_key_from_raw_bytes(public_key, Id::X25519)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
-            let ephemeral = p384_private_key(&crate::crypto::random_byte_array(48))?;
-            let ciphertext = ephemeral.public_key().to_sec1_bytes().to_vec();
-            let shared_key = p384::elliptic_curve::ecdh::diffie_hellman(
-                ephemeral.to_nonzero_scalar(),
-                recipient.as_affine(),
-            )
-            .raw_secret_bytes()
-            .to_vec();
+            let ephemeral = x25519_key_from_seed(&crate::crypto::random_byte_array(32))?;
+            let ciphertext = ephemeral
+                .raw_public_key()
+                .map_err(|_| CryptoError::OperationFailed(None))?;
+            let shared_key = reject_all_zero(agree(&ephemeral, &recipient)?)?;
             Ok((ciphertext, shared_key))
         },
     }
@@ -571,35 +622,15 @@ fn traditional_decapsulate(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     match private_key {
-        TraditionalPrivateKey::P256(private_key) => {
-            let public_key = p256::PublicKey::from_sec1_bytes(ciphertext)
+        TraditionalPrivateKey::Ec(nid, private_key) => {
+            let peer = ec_peer_key(*nid, ciphertext)
                 .map_err(|_| CryptoError::OperationFailed(None))?;
-            Ok(p256::elliptic_curve::ecdh::diffie_hellman(
-                private_key.to_nonzero_scalar(),
-                public_key.as_affine(),
-            )
-            .raw_secret_bytes()
-            .to_vec())
+            agree(private_key, &peer)
         },
         TraditionalPrivateKey::X25519(private_key) => {
-            let public_key = x25519_dalek::PublicKey::from(
-                <[u8; 32]>::try_from(ciphertext).map_err(|_| CryptoError::OperationFailed(None))?,
-            );
-            let shared_key = private_key.diffie_hellman(&public_key);
-            if shared_key.as_bytes().iter().all(|byte| *byte == 0) {
-                return Err(CryptoError::OperationFailed(None));
-            }
-            Ok(shared_key.as_bytes().to_vec())
-        },
-        TraditionalPrivateKey::P384(private_key) => {
-            let public_key = p384::PublicKey::from_sec1_bytes(ciphertext)
+            let peer = PKey::public_key_from_raw_bytes(ciphertext, Id::X25519)
                 .map_err(|_| CryptoError::OperationFailed(None))?;
-            Ok(p384::elliptic_curve::ecdh::diffie_hellman(
-                private_key.to_nonzero_scalar(),
-                public_key.as_affine(),
-            )
-            .raw_secret_bytes()
-            .to_vec())
+            reject_all_zero(agree(private_key, &peer)?)
         },
     }
 }
@@ -628,17 +659,14 @@ pub(crate) fn import_hybrid_kem_public_key(
     }
     let (pq_public_key, traditional_public_key) = data.split_at(variant.pq_public_key_length());
     let pq_public_key = import_ml_kem_public_key(variant.ml_kem_variant(), pq_public_key, false)?;
-    match variant {
-        HybridKemVariant::MlKem768P256 => {
-            p256::PublicKey::from_sec1_bytes(traditional_public_key)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
+    // Parsing is the validation: an EC point has to be on the curve, and an
+    // X25519 point has to be the right length.
+    match hybrid_curve(variant) {
+        Some(nid) => {
+            ec_peer_key(nid, traditional_public_key)?;
         },
-        HybridKemVariant::MlKem768X25519 => {
-            <[u8; 32]>::try_from(traditional_public_key)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-        },
-        HybridKemVariant::MlKem1024P384 => {
-            p384::PublicKey::from_sec1_bytes(traditional_public_key)
+        None => {
+            PKey::public_key_from_raw_bytes(traditional_public_key, Id::X25519)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
         },
     }
