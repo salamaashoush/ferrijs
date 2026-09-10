@@ -1515,6 +1515,99 @@ mod tests {
             }
         }
 
+        // The hybrid KEMs and ML-KEM had no tests at all. Their key derivation
+        // is deterministic from the seed, so it pins exactly: SHAKE-256 expands
+        // the seed, the traditional half is rejection-sampled from a slice of
+        // that expansion, and the public key is the PQ half followed by the
+        // traditional point. A change to any of those three moves the derived
+        // key, which nothing else here would notice.
+        const HYBRID_VECTORS: &[(HybridKemVariant, usize, &str, &str)] = &[
+            (
+                HybridKemVariant::MlKem768P256,
+                1249,
+                "a00425d7b8c40c0bf17a22205a0787126a2b56cdecf2ca5401cdefbc05fb727c",
+                "16725cb7a29ea3d40ab1f23275f77c1978972bece4d98362323d62a0023fd4776ac576a05cf69cd9",
+            ),
+            (
+                HybridKemVariant::MlKem768X25519,
+                1216,
+                "c9a3565ffde4f72b51661be391ee13e46378d7f06dd5c8bf5af9d2cfb5b8336b",
+                "faf7f1fbd075dab344e9d7d146647281fbba7b3c56cafd5833b7a930ec4206e7c3a6d7764fe81d7a",
+            ),
+            (
+                HybridKemVariant::MlKem1024P384,
+                1665,
+                "a8a5a7c2ee19c31f2b003586440acef7759b5a88bd499219b8083c78e385e64f",
+                "4c1d93df99c5b96e06175b973913a139a4f6ebd9922afeaf17223b63cef99976992257653b376f3e",
+            ),
+        ];
+
+        const ML_KEM_VECTORS: &[(MlKemVariant, &str)] = &[
+            (
+                MlKemVariant::MlKem512,
+                "3ae268dccc5456ac0d0f9b39257dc48fe081383b97c400512d712b739762daee",
+            ),
+            (
+                MlKemVariant::MlKem768,
+                "0b7934c83125c788995e2ba6bd761e33046b3e40571be53e023309a29f398cc9",
+            ),
+            (
+                MlKemVariant::MlKem1024,
+                "c7b8fa0aa471d5ae18922d6ccad5b31e1d84f92ae723abfd13747018740a8530",
+            ),
+        ];
+
+        fn sha256_hex(p: &impl CryptoProvider, data: &[u8]) -> String {
+            let mut h = p.digest(HashAlgorithm::Sha256);
+            h.update(data);
+            h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        #[test]
+        fn test_hybrid_kem_derivation_known_answers() {
+            let p = provider();
+            let seed: Vec<u8> = (0u8..32).collect();
+            for (variant, len, pk_hash, tail) in HYBRID_VECTORS {
+                let pk = modern::hybrid_kem_public_key(*variant, &seed).unwrap();
+                assert_eq!(pk.len(), *len, "{variant:?} public key length");
+                assert_eq!(&sha256_hex(&p, &pk), pk_hash, "{variant:?} public key");
+                let got_tail: String = pk[pk.len() - 40..]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                assert_eq!(&got_tail, tail, "{variant:?} traditional half");
+
+                // Encapsulate against the derived key and decapsulate with the
+                // seed: both sides must reach the same shared secret.
+                let (ciphertext, encapsulated) =
+                    modern::hybrid_kem_encapsulate(*variant, &pk).unwrap();
+                let decapsulated =
+                    modern::hybrid_kem_decapsulate(*variant, &seed, &ciphertext).unwrap();
+                assert_eq!(encapsulated, decapsulated, "{variant:?} shared secret");
+
+                let mut tampered = ciphertext.clone();
+                tampered[0] ^= 0x01;
+                let other = modern::hybrid_kem_decapsulate(*variant, &seed, &tampered);
+                assert!(
+                    other.is_err() || other.unwrap() != decapsulated,
+                    "{variant:?} tampered ciphertext"
+                );
+            }
+        }
+
+        #[test]
+        fn test_ml_kem_derivation_known_answers() {
+            let p = provider();
+            let seed: Vec<u8> = (0u8..64).collect();
+            for (variant, hash) in ML_KEM_VECTORS {
+                let pk = modern::ml_kem_public_key(*variant, &seed).unwrap();
+                assert_eq!(&sha256_hex(&p, &pk), hash, "{variant:?} public key");
+                let (ciphertext, shared) = modern::ml_kem_encapsulate(*variant, &pk).unwrap();
+                let back = modern::ml_kem_decapsulate(*variant, &seed, &ciphertext).unwrap();
+                assert_eq!(shared, back, "{variant:?} shared secret");
+            }
+        }
+
         #[test]
         fn test_rsa_pkcs1v15_known_answer() {
             let p = provider();

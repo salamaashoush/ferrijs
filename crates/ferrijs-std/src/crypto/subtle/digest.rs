@@ -3,8 +3,8 @@ use std::future::Future;
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 use crate::utils::bytes::ObjectBytes;
+use openssl::hash::MessageDigest;
 use rquickjs::{ArrayBuffer, Ctx, Exception, Object, Result, Value};
-use sha3::{Digest, Sha3_256, Sha3_384, Sha3_512};
 
 use crate::crypto::{
     hash::HashAlgorithm,
@@ -62,6 +62,12 @@ enum DigestAlgorithm {
     },
 }
 
+fn sha3_digest(md: MessageDigest, input: &[u8]) -> Vec<u8> {
+    openssl::hash::hash(md, input)
+        .expect("SHA-3 over an in-memory buffer")
+        .to_vec()
+}
+
 pub fn subtle_digest<'js>(
     ctx: Ctx<'js>,
     algorithm: Value<'js>,
@@ -86,9 +92,9 @@ pub fn subtle_digest<'js>(
         };
         let bytes = match algorithm {
             DigestAlgorithm::Fixed(hash) => digest(&hash, &input),
-            DigestAlgorithm::Sha3_256 => Sha3_256::digest(&input).to_vec(),
-            DigestAlgorithm::Sha3_384 => Sha3_384::digest(&input).to_vec(),
-            DigestAlgorithm::Sha3_512 => Sha3_512::digest(&input).to_vec(),
+            DigestAlgorithm::Sha3_256 => sha3_digest(MessageDigest::sha3_256(), &input),
+            DigestAlgorithm::Sha3_384 => sha3_digest(MessageDigest::sha3_384(), &input),
+            DigestAlgorithm::Sha3_512 => sha3_digest(MessageDigest::sha3_512(), &input),
             DigestAlgorithm::CShake {
                 strength,
                 output_length,

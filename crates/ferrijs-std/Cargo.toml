@@ -92,7 +92,6 @@ either = "1"
 base64 = { workspace = true }
 # `llrt_crypto` (crypto-rust provider) and the `llrt_json` it needs for JWK
 # import/export. Versions match upstream's manifest at the vendored commit.
-chacha20poly1305 = { version = "0.11", features = ["alloc"], default-features = false }
 const-oid = { version = "0.10", features = ["db"], default-features = false }
 cshake = { version = "0.2", features = ["alloc"], default-features = false }
 crc32c = { version = "0.6", default-features = false }
@@ -108,8 +107,6 @@ p384 = { version = "0.14.0", features = ["alloc", "ecdh", "ecdsa", "pkcs8"], def
 pkcs1 = { version = "0.8.0-rc.4", features = ["alloc"], default-features = false }
 pkcs8 = { version = "0.11", features = ["alloc"], default-features = false }
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
-sha3 = { version = "0.12", default-features = false }
-shake = { version = "0.1", default-features = false }
 simd-json = { version = "0.18", features = ["big-int-as-float"], default-features = false }
 spki = { version = "0.8", features = ["alloc"], default-features = false }
 sponge-cursor = { version = "0.1", default-features = false }

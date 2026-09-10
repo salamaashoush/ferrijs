@@ -1,10 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use chacha20poly1305::{
-    aead::{Aead, Payload},
-    ChaCha20Poly1305, KeyInit, Nonce,
-};
 #[cfg(feature = "_subtle-full")]
 use ml_dsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use ml_dsa::{
@@ -54,24 +50,28 @@ macro_rules! dispatch_ml_kem {
     };
 }
 
+// ChaCha20-Poly1305 always carries a 128-bit tag, and WebCrypto appends it to
+// the ciphertext, the same shape as AES-GCM here.
+const CHACHA20_POLY1305_TAG_LEN: usize = 16;
+
 pub(crate) fn chacha20_poly1305_encrypt(
     key: &[u8],
     iv: &[u8],
     data: &[u8],
     additional_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, CryptoError> {
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidKey(None))?;
-    let nonce = Nonce::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
-    cipher
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: data,
-                aad: additional_data.unwrap_or_default(),
-            },
-        )
-        .map_err(|_| CryptoError::EncryptionFailed(None))
+    let mut tag = vec![0u8; CHACHA20_POLY1305_TAG_LEN];
+    let mut ciphertext = openssl::symm::encrypt_aead(
+        openssl::symm::Cipher::chacha20_poly1305(),
+        key,
+        Some(iv),
+        additional_data.unwrap_or_default(),
+        data,
+        &mut tag,
+    )
+    .map_err(|_| CryptoError::EncryptionFailed(None))?;
+    ciphertext.extend_from_slice(&tag);
+    Ok(ciphertext)
 }
 
 pub(crate) fn chacha20_poly1305_decrypt(
@@ -80,18 +80,19 @@ pub(crate) fn chacha20_poly1305_decrypt(
     data: &[u8],
     additional_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, CryptoError> {
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidKey(None))?;
-    let nonce = Nonce::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
-    cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: data,
-                aad: additional_data.unwrap_or_default(),
-            },
-        )
-        .map_err(|_| CryptoError::DecryptionFailed(None))
+    if data.len() < CHACHA20_POLY1305_TAG_LEN {
+        return Err(CryptoError::DecryptionFailed(None));
+    }
+    let (ciphertext, tag) = data.split_at(data.len() - CHACHA20_POLY1305_TAG_LEN);
+    openssl::symm::decrypt_aead(
+        openssl::symm::Cipher::chacha20_poly1305(),
+        key,
+        Some(iv),
+        additional_data.unwrap_or_default(),
+        ciphertext,
+        tag,
+    )
+    .map_err(|_| CryptoError::DecryptionFailed(None))
 }
 
 fn ml_dsa_signing_key<P: MlDsaParameterSet>(seed: &[u8]) -> Result<SigningKey<P>, CryptoError> {
@@ -404,12 +405,15 @@ struct HybridKeyPair {
 }
 
 fn shake256(input: &[u8], output_length: usize) -> Vec<u8> {
-    use shake::{ExtendableOutput, Update, XofReader};
-
-    let mut output = vec![0; output_length];
-    let mut hash = shake::Shake256::default();
-    hash.update(input);
-    hash.finalize_xof().read(&mut output);
+    // SHAKE is an XOF, so the digest length is the caller's choice rather than
+    // the algorithm's.
+    let mut output = vec![0u8; output_length];
+    let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::shake_256())
+        .expect("EVP_MD_CTX allocation");
+    hasher.update(input).expect("EVP_DigestUpdate");
+    hasher
+        .finish_xof(&mut output)
+        .expect("EVP_DigestFinalXOF");
     output
 }
 
@@ -489,8 +493,6 @@ fn hybrid_kem_combiner(
     traditional_ciphertext: &[u8],
     traditional_public_key: &[u8],
 ) -> Vec<u8> {
-    use sha3::Digest;
-
     let label: &[u8] = match variant {
         HybridKemVariant::MlKem768P256 => b"MLKEM768-P256",
         HybridKemVariant::MlKem768X25519 => b"\\.//^\\",
@@ -508,7 +510,9 @@ fn hybrid_kem_combiner(
     input.extend_from_slice(traditional_ciphertext);
     input.extend_from_slice(traditional_public_key);
     input.extend_from_slice(label);
-    sha3::Sha3_256::digest(input).to_vec()
+    openssl::hash::hash(openssl::hash::MessageDigest::sha3_256(), &input)
+        .expect("SHA3-256 over an in-memory buffer")
+        .to_vec()
 }
 
 fn traditional_encapsulate(
