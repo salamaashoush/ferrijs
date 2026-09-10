@@ -494,8 +494,8 @@ the extension that needs it.
     `ctx.catch()` at that point and re-thrown inside the future, where
     the rejection is built. Upstream candidate.
 
-34. **`fs/access.rs` — preserve filesystem error identity.** Sync and
-    async access failures use `node::system_error` to retain `code`,
+34. **`fs/access.rs` and `fs/stats.rs` — preserve filesystem error identity.** Sync and
+    async access, stat, and lstat failures use `node::system_error` to retain `code`,
     `errno`, `syscall`, and `path`. Previously every metadata failure
     became a plain missing-file message, preventing callers from
     distinguishing missing paths from permission or directory errors.

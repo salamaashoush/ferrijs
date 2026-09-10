@@ -12,6 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use crate::node::system_error;
 use crate::utils::result::ResultExt;
 use rquickjs::{Ctx, Result};
 use tokio::fs;
@@ -317,7 +318,7 @@ impl Stats {
 pub async fn stat_fn(ctx: Ctx<'_>, path: String) -> Result<Stats> {
     let metadata = fs::metadata(&path)
         .await
-        .or_throw_msg(&ctx, &["Can't stat \"", &path, "\""].concat())?;
+        .map_err(|error| system_error::throw(&ctx, &error, "stat", &path))?;
 
     let stats = Stats::new(metadata);
 
@@ -325,8 +326,8 @@ pub async fn stat_fn(ctx: Ctx<'_>, path: String) -> Result<Stats> {
 }
 
 pub fn stat_fn_sync(ctx: Ctx<'_>, path: String) -> Result<Stats> {
-    let metadata =
-        std::fs::metadata(&path).or_throw_msg(&ctx, &["Can't stat \"", &path, "\""].concat())?;
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| system_error::throw(&ctx, &error, "stat", &path))?;
 
     let stats = Stats::new(metadata);
 
@@ -336,7 +337,7 @@ pub fn stat_fn_sync(ctx: Ctx<'_>, path: String) -> Result<Stats> {
 pub async fn lstat_fn(ctx: Ctx<'_>, path: String) -> Result<Stats> {
     let metadata = fs::symlink_metadata(&path)
         .await
-        .or_throw_msg(&ctx, &["Can't lstat \"", &path, "\""].concat())?;
+        .map_err(|error| system_error::throw(&ctx, &error, "lstat", &path))?;
 
     let stats = Stats::new(metadata);
 
@@ -345,7 +346,7 @@ pub async fn lstat_fn(ctx: Ctx<'_>, path: String) -> Result<Stats> {
 
 pub fn lstat_fn_sync(ctx: Ctx<'_>, path: String) -> Result<Stats> {
     let metadata = std::fs::symlink_metadata(&path)
-        .or_throw_msg(&ctx, &["Can't lstat \"", &path, "\""].concat())?;
+        .map_err(|error| system_error::throw(&ctx, &error, "lstat", &path))?;
 
     let stats = Stats::new(metadata);
 
