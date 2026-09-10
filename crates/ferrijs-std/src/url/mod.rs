@@ -35,9 +35,17 @@ pub fn domain_to_ascii(domain: &str) -> String {
     quirks::domain_to_ascii(domain)
 }
 
-//options are ignored, no windows support yet
+// Node resolves the path before converting it, so a root-relative path like
+// `/tmp/x` is accepted everywhere: on Windows it names the current drive, which
+// is what `path.resolve` does there. `Url::from_file_path` alone rejects it,
+// because a Windows absolute path needs a drive or UNC prefix.
+//
+// `options` is ignored: it only selects Windows vs POSIX parsing, and the host
+// platform already decides that here.
 pub fn path_to_file_url<'js>(ctx: Ctx<'js>, path: String, _: Opt<Value>) -> Result<URL<'js>> {
-    let url = Url::from_file_path(&path)
+    let resolved = std::path::absolute(&path)
+        .map_err(|_| Exception::throw_type(&ctx, &["Path is not absolute: ", &path].concat()))?;
+    let url = Url::from_file_path(&resolved)
         .map_err(|_| Exception::throw_type(&ctx, &["Path is not absolute: ", &path].concat()))?;
 
     URL::from_url(ctx, url)
@@ -64,11 +72,35 @@ pub fn file_url_to_path<'js>(ctx: Ctx<'js>, url: Value<'js>) -> Result<String> {
     };
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let decoded = decode_file_url_path(&ctx, path)?;
+    let decoded = strip_windows_drive_prefix(&decoded);
 
     Ok(PathBuf::from_str(&decoded)
         .or_throw(&ctx)?
         .to_string_lossy()
         .to_string())
+}
+
+// A file URL spells a Windows path as `/C:/dir/file`, with a leading slash the
+// filesystem does not want and separators the wrong way round. Node hands back
+// `C:\dir\file`, so the slash goes and the separators turn. On any other
+// platform the path is already what it should be.
+#[cfg(windows)]
+fn strip_windows_drive_prefix(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let has_drive = bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':';
+    if has_drive {
+        path[1..].replace('/', "\\")
+    } else {
+        path.replace('/', "\\")
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_windows_drive_prefix(path: &str) -> String {
+    path.to_string()
 }
 
 /// Percent-decode a `file:` URL's path. An ENCODED separator is

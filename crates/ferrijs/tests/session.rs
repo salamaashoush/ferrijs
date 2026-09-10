@@ -799,8 +799,19 @@ async fn node_url_module_serves_the_path_and_host_helpers() {
     )
     .await;
   let v = ok(&r);
-  assert_eq!(v["path"], serde_json::json!("/tmp/a b.txt"), "{v}");
-  assert_eq!(v["href"], serde_json::json!("file:///tmp/a%20b.txt"), "{v}");
+  // On Windows a file URL carries a drive letter, and which one depends on the
+  // checkout, so the shape is checked there instead of the literal.
+  if cfg!(target_os = "windows") {
+    assert_eq!(v["path"], serde_json::json!("\\tmp\\a b.txt"), "{v}");
+    let href = v["href"].as_str().expect("href");
+    assert!(
+      href.starts_with("file:///") && href.ends_with("/tmp/a%20b.txt"),
+      "unexpected href: {href}"
+    );
+  } else {
+    assert_eq!(v["path"], serde_json::json!("/tmp/a b.txt"), "{v}");
+    assert_eq!(v["href"], serde_json::json!("file:///tmp/a%20b.txt"), "{v}");
+  }
   assert_eq!(v["ascii"], serde_json::json!("xn--bcher-kva.de"), "{v}");
   assert_eq!(v["unicode"], serde_json::json!("bücher.de"), "{v}");
   assert_eq!(v["sameClass"], serde_json::json!(true), "one URL class per VM: {v}");

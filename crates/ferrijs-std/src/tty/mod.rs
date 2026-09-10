@@ -7,8 +7,24 @@ use rquickjs::{
     Ctx, Result,
 };
 
+// Windows' CRT `_isatty` answers for any character device, so a pipe to NUL
+// counts and the result disagrees with what Node reports through
+// `uv_guess_handle`. `IsTerminal` asks the console directly, which is the same
+// question, so the three standard descriptors go through it. Anything else
+// still has to be asked of the C library, and Windows has no descriptor table
+// to ask about.
 fn isatty(fd: i32) -> bool {
-    unsafe { libc::isatty(fd) != 0 }
+    use std::io::IsTerminal;
+
+    match fd {
+        0 => std::io::stdin().is_terminal(),
+        1 => std::io::stdout().is_terminal(),
+        2 => std::io::stderr().is_terminal(),
+        #[cfg(unix)]
+        other => unsafe { libc::isatty(other) != 0 },
+        #[cfg(not(unix))]
+        _ => false,
+    }
 }
 
 pub struct TtyModule;

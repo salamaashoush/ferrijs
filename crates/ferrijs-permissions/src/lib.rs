@@ -1440,7 +1440,12 @@ mod tests {
     let back = serde_json::to_value(&p).unwrap();
     assert_eq!(back["read"], serde_json::Value::Bool(true));
     assert_eq!(back["net"][0], "*.acme.com:443");
-    assert_eq!(back["deny"]["read"][0], "/etc");
+    // A rule is stored absolute and normalised, and `/etc` is root-relative on
+    // Windows, so it comes back on the current drive. What matters is that the
+    // serialised form re-parses to the same policy.
+    let round_trip: Permissions = serde_json::from_value(back.clone()).unwrap();
+    assert!(round_trip.check_read(Path::new("/etc/hosts")).is_err());
+    assert_eq!(round_trip.deny.read.len(), 1);
     let plain: Permissions = serde_json::from_str(r#"{"read": true}"#).unwrap();
     assert!(serde_json::to_value(&plain).unwrap().get("deny").is_none());
   }

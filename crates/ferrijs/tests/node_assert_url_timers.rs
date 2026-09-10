@@ -144,9 +144,27 @@ async fn url_process_and_timers_modules() {
   )
   .await;
 
-  assert_eq!(value["decoded"], "/tmp/a b#c.txt");
-  assert_eq!(value["roundTrip"], "/tmp/a b#c.txt");
-  assert_eq!(value["encodedHref"], "file:///tmp/a%20b%23c.txt");
+  // A file URL names a Windows path with a drive, and which drive depends on
+  // where the runner checked the repository out, so the shape is asserted there
+  // rather than the literal. The escaping is the point either way: a space
+  // becomes %20 and a `#` becomes %23 instead of starting a fragment.
+  if cfg!(target_os = "windows") {
+    assert_eq!(value["decoded"], "\\tmp\\a b#c.txt");
+    let href = value["encodedHref"].as_str().expect("href");
+    assert!(
+      href.starts_with("file:///") && href.ends_with("/tmp/a%20b%23c.txt"),
+      "unexpected href: {href}"
+    );
+    let round_trip = value["roundTrip"].as_str().expect("roundTrip");
+    assert!(
+      round_trip.ends_with("\\tmp\\a b#c.txt"),
+      "unexpected round trip: {round_trip}"
+    );
+  } else {
+    assert_eq!(value["decoded"], "/tmp/a b#c.txt");
+    assert_eq!(value["roundTrip"], "/tmp/a b#c.txt");
+    assert_eq!(value["encodedHref"], "file:///tmp/a%20b%23c.txt");
+  }
   assert!(
     value["badScheme"].as_str().is_some_and(|m| m.contains("file")),
     "a non-file URL is refused: {value:?}"

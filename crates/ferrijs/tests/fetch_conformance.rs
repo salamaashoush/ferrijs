@@ -122,12 +122,11 @@ const CHECKS: &[(&str, &str, &str)] = &[
   ),
   (
     // `endings: 'native'` rewrites every CRLF to the platform's line
-    // ending, which is LF on both platforms this runtime supports — so
-    // "a\r\nb" loses a byte. The previous Blob ignored the option
-    // entirely and kept all four.
+    // ending, so "a\r\nb" loses a byte where that is LF and keeps all four
+    // on Windows. The previous Blob ignored the option entirely.
     "Blob endings native",
     "return String(new Blob(['a\\r\\nb'], {endings:'native'}).size);",
-    "3",
+    if cfg!(target_os = "windows") { "4" } else { "3" },
   ),
   (
     "Blob type lowercased",

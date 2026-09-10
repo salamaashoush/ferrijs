@@ -66,8 +66,20 @@ async fn os_reports_the_host_it_runs_on() {
 
 /// Who and where the host is: the uname triple, the paths, the constants.
 fn assert_identity(value: &serde_json::Value) {
-  let expected_platform = if cfg!(target_os = "macos") { "darwin" } else { "linux" };
-  let expected_type = if cfg!(target_os = "macos") { "Darwin" } else { "Linux" };
+  let expected_platform = if cfg!(target_os = "macos") {
+    "darwin"
+  } else if cfg!(target_os = "windows") {
+    "win32"
+  } else {
+    "linux"
+  };
+  let expected_type = if cfg!(target_os = "macos") {
+    "Darwin"
+  } else if cfg!(target_os = "windows") {
+    "Windows_NT"
+  } else {
+    "Linux"
+  };
   assert_eq!(value["platform"], expected_platform);
   assert_eq!(value["type"], expected_type);
   assert_eq!(
@@ -193,7 +205,13 @@ async fn os_serves_the_same_surface_through_require() {
 
   assert_eq!(
     value["platform"],
-    if cfg!(target_os = "macos") { "darwin" } else { "linux" }
+    if cfg!(target_os = "macos") {
+      "darwin"
+    } else if cfg!(target_os = "windows") {
+      "win32"
+    } else {
+      "linux"
+    }
   );
   assert_eq!(value["sameThroughPrefixedSpecifier"], serde_json::Value::Bool(true));
 

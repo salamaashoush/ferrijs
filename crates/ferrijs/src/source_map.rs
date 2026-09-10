@@ -473,7 +473,13 @@ mod tests {
     std::fs::write(root.join("specs/a.ts"), "").expect("write");
 
     let mapper = SourceMapper::new("bundle.js", LazyMap::default()).with_cwd(&root);
-    assert_eq!(mapper.absolute("specs/a.ts"), root.join("specs/a.ts").to_string_lossy());
+    // `join` keeps an embedded `/` verbatim, so the expected value is built a
+    // component at a time; `absolute` normalises and would not match it on a
+    // platform whose separator is not `/`.
+    assert_eq!(
+      mapper.absolute("specs/a.ts"),
+      root.join("specs").join("a.ts").to_string_lossy()
+    );
     // Without one, the process cwd answers instead, which is the bug:
     // the file it names is not the one the bundler read.
     assert_ne!(
