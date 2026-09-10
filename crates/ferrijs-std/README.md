@@ -503,3 +503,31 @@ the extension that needs it.
 35. **`fs/read_file.rs` — preserve read and open errors.** Sync and
     async reads retain `code`, `errno`, `syscall`, and `path` through
     `node::system_error`, including `EISDIR` for reading a directory.
+
+36. **`crypto/provider/rust/mod.rs` — RSA is ours, on OpenSSL, not
+    upstream's `rsa`.** This is the most important entry in this list: a
+    re-sync diffs against upstream and would otherwise drag the
+    RustCrypto `rsa` back in. Upstream's pure-Rust provider implements
+    RSA with the `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin
+    attack: key recovery through a timing side channel in a
+    non-constant-time implementation). RustSec records `patched = []`,
+    so there is no version to move to and no consumer can resolve it by
+    bumping. Every RSA operation — PSS and PKCS#1 v1.5 sign and verify,
+    OAEP encrypt and decrypt, key generation, and the PKCS#1 / PKCS#8 /
+    SPKI / JWK conversions — now goes through the `openssl` crate
+    (vendored OpenSSL 3.x) via `PkeyCtx`, while the rest of the provider
+    stays on RustCrypto. `pkcs1` is a direct dependency now because the
+    `RSAPrivateKey` / `RSAPublicKey` ASN.1 types used to arrive through
+    `rsa`; it is DER structure only and carries no advisory.
+
+    OpenSSL was chosen over `aws-lc-rs` because its safe API is the only
+    one that keeps the whole surface: arbitrary PSS `saltLength`
+    (`RsaPssSaltlen::custom`), arbitrary `modulusLength` and `e = 3`
+    (`generate_with_e`), SHA-1 signing, and private-key JWK export via
+    the component accessors. `aws-lc-rs` pins the PSS salt to the digest
+    length in a `pub(crate)` function, exposes key generation only as a
+    four-value enum, and offers no component accessors, so adopting it
+    would have silently dropped four documented behaviours.
+
+    On re-sync: keep OUR RSA methods and the `openssl` dependency. Do
+    not take upstream's `rsa`-based ones back.

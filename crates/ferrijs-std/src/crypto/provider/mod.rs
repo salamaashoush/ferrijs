@@ -1348,6 +1348,207 @@ mod tests {
             assert_eq!(alice_shared, bob_shared);
         }
 
+        // Vectors produced by the OpenSSL command-line tool, an implementation
+        // independent of this binding, so a padding, digest or label regression
+        // in the port fails here rather than round-tripping against itself.
+        const KAT_PRIVATE_KEY_PKCS1_DER: &str = "308204a40201000282010100b6bea7cd955740133dd49eae5358b3016ebce706f1d05974bc2b3e3ffc98099a7fbbc00d31cf8097f61dbbec2a7fc810f75c5ea90725cd758ed61c993269421f584c0fab8aea4bd56f70cb2fc34aa2c894b35c1bfc96b0212c076d58a34ef20c430401e4bb13498ba6285292fa86a99fccd144a254a65e3ab9a577b0068114ef80664d6ae987433ff53620494449d9a1d44aa1e60e53123dad6e4c26818bc1fc3b925074908a1e1143352dc3ed04370ec21393949d9618ac4c19b3d3cb0b11152df5103f70050bf538c92758d5b219d1b1ff81a3e1a2aec1e997662c7c575e759434a25f8e9f1def13f6723c4a0d7a1aefe28d949151d5eebde4250874efb10302030100010282010000fbbeff6b8c4ffb4a868db6b6701b167e380f58dee2eb7850ad92e4d94120316ffa8755602d3e5892ff24a1bd60cea778b7f5dd1c52bc6ba387221998f1d964931f1053db52d8c6f495e62202ffb07c8fd59f4099f8084945696227409f0e226417436e03010990f225f41122695319af0a793f690bdecf461723dbbdf7e2859d16a9bba6ad5fff4a305291f6ef3ad227ad5ccbd6519748694633d3904b2af48f137a437891bb6b74c7d6bedd417ce88562601a4b9a55b2df5857e79871f117b10add8be40c5be81ca1980c3bec88ce20170cc4b24951a7cb33605763f8f433361667b9f843d6c362d632a83681e7dedd345520a54effdb408f8a0836a6f0c102818100d97008c5b2ef4d2ed4d905150eddd15011a580b0b0bfa403e4d3d6100d6d7310e3f2537e515bb4c526456276ee1728fd91ee2d773ee645aaaf639d7d3e508fc23b822a3b866aeb452a64a421e16c53717a8b508f83b751a05a8b90dfc7c0d527507f18b020fa396febcc5e734019e6f5fe4f09bcabb26e03db88ab204a030cd302818100d727844bdf3996bbd1c3a2033509f8cbd5627cc4c495a7cfe1ce6930fb928361e200c51ae7af252b0f6a16c486a7bbcace399ccbcc90e029fd195a9deaf27e33e09f7a088fe4af96fc377f77d252cbb4413f4dd0d1916508bd9f47eb35105caa00b893935dd02f19d253943687b008aa3664d10bd85484c5519236d1e4e26d1102818100c5c79e73159b8dfd37265ff5139cb8b3b8196ec14944481032a86d621494a5c18b55f49445b4c0ed432e81ade44bb4c15167f07b32ff8a070399fcbadb5fb423dcb53d6cff8b698d744e2eed927a523c3a575663f44f5f3418a832931ac3501f7e9cdcfbf84322d3a70c322d6af5249c4541e77d723fceca3b7a490e09c45479028181009e75392753f92afd9b08f52a5d86c19905c82a5214e28f9c3816f83c1e1c12ed253121f9a5c6c59e08153f3d705adaa10bef3c7e9063e6e4a5c66589c6bedf99bf8654af37a2da7b5db85605de7e220ed8bb11c9887f07a53f5aaef218bbbb336da282f5d6f2fbad8dcd066c7ed4741d40405201e24aa51a59f050b59757f7b102818031cc5b6b4eb01bf457a1e1152ee7b77128a2c62922d7f750ab16d2563859031fc8b401c442ef03d0ede358baac43dc1ec0fd03ccaea4ce3fd80d1462302d05005f38b6abb22bff69eee01b98e46a43d0c76fba071df7ac1cdf4dd4261c85befa9fdda04be703cec0b332f233f0401777e4f68b59d513db6ffda73bc0442c6a92";
+        const KAT_PUBLIC_KEY_PKCS1_DER: &str = "3082010a0282010100b6bea7cd955740133dd49eae5358b3016ebce706f1d05974bc2b3e3ffc98099a7fbbc00d31cf8097f61dbbec2a7fc810f75c5ea90725cd758ed61c993269421f584c0fab8aea4bd56f70cb2fc34aa2c894b35c1bfc96b0212c076d58a34ef20c430401e4bb13498ba6285292fa86a99fccd144a254a65e3ab9a577b0068114ef80664d6ae987433ff53620494449d9a1d44aa1e60e53123dad6e4c26818bc1fc3b925074908a1e1143352dc3ed04370ec21393949d9618ac4c19b3d3cb0b11152df5103f70050bf538c92758d5b219d1b1ff81a3e1a2aec1e997662c7c575e759434a25f8e9f1def13f6723c4a0d7a1aefe28d949151d5eebde4250874efb1030203010001";
+        const KAT_PKCS1V15_SHA256_SIG: &str = "032464396e8ff2484b13570d49fad435c145b47eae3a257a6238f5e0c00431901d43c663ae785bda51b8ba35d50fe9a41f682c3765bcb3ad4b8fd704a3ca849da0ebc62e8c02bdc0310c336c2040d6f50331cbe65590ba3d30cb5300cd9dd2681a714abfb90a55db592d770281990f246b229b73ca2a257d4766663b3eb599fcf809da50c00d0b14395dc91522707c6d8e9d4de6e3b3986b8dee0dc5c5a963d1b3107a21e2f82fa5d7d2a7438f412e1f1ebec41a05e3f03ed192cf904b959d434830f53219eaa3088670bee1b4582b542f4fda69c3cfbee035a4e16f1042c37225b6ab4bed319cc9ee0cc7009c743059bc29ed6651f74cd8afd93fc9158ab6c3";
+        const KAT_OAEP_SHA256_LABELLED_CT: &str = "62c250501c105feb2a9334d607724b2369a84b9e1f7f2b052cb68a5e1ed9d321a811aaf7f799ee802457a49f331ca93ae7d1be0d7c2fd3922e030f3961c8f8e40e831325a1df5240f5a70893b5d12eeb8352bea8a92996567ea1535abeab10949a04f716143ba9b8a53223bfc6c264ef39f4c0998c0d7c9c7cac90e4d40717f768296405690fb9b477c42835dee2d8ba4c8945551a32f17e4295fac020b3a26274b265574b1e762bb1b7b5ee410c5029de5fc1ce963a52a21230ebece2bee3088b9b295b18a6b5a6d0c40a82e1a679f085eabf0e8cc6c16f0bfe9859928350e6dc6be9c2cfd3ff6a69b336203e093b59df5f16db08ba7b0748d73fccc8a1a330";
+        const KAT_MESSAGE: &[u8] = b"message to sign";
+        const KAT_OAEP_PLAINTEXT: &[u8] = b"secret payload";
+        const KAT_OAEP_LABEL: &[u8] = &[0x00, 0xff, 0x10];
+
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        }
+
+        fn kat_keys() -> (Vec<u8>, Vec<u8>) {
+            (
+                unhex(KAT_PRIVATE_KEY_PKCS1_DER),
+                unhex(KAT_PUBLIC_KEY_PKCS1_DER),
+            )
+        }
+
+        #[test]
+        fn test_rsa_pkcs1v15_known_answer() {
+            let p = provider();
+            let (_, public_key) = kat_keys();
+            let mut digest = p.digest(HashAlgorithm::Sha256);
+            digest.update(KAT_MESSAGE);
+            let hash = digest.finalize();
+
+            assert!(p
+                .rsa_pkcs1v15_verify(
+                    &public_key,
+                    &unhex(KAT_PKCS1V15_SHA256_SIG),
+                    &hash,
+                    HashAlgorithm::Sha256
+                )
+                .unwrap());
+        }
+
+        #[test]
+        fn test_rsa_pkcs1v15_sign_matches_known_answer() {
+            // PKCS#1 v1.5 is deterministic, so our signature must be the vector.
+            let p = provider();
+            let (private_key, _) = kat_keys();
+            let mut digest = p.digest(HashAlgorithm::Sha256);
+            digest.update(KAT_MESSAGE);
+            let hash = digest.finalize();
+
+            let signature = p
+                .rsa_pkcs1v15_sign(&private_key, &hash, HashAlgorithm::Sha256)
+                .unwrap();
+            assert_eq!(signature, unhex(KAT_PKCS1V15_SHA256_SIG));
+        }
+
+        #[test]
+        fn test_rsa_oaep_decrypt_known_answer_with_binary_label() {
+            let p = provider();
+            let (private_key, _) = kat_keys();
+            let plaintext = p
+                .rsa_oaep_decrypt(
+                    &private_key,
+                    &unhex(KAT_OAEP_SHA256_LABELLED_CT),
+                    HashAlgorithm::Sha256,
+                    Some(KAT_OAEP_LABEL),
+                )
+                .unwrap();
+            assert_eq!(plaintext, KAT_OAEP_PLAINTEXT);
+        }
+
+        #[test]
+        fn test_rsa_oaep_wrong_label_is_rejected() {
+            // The label authenticates the ciphertext; a different one must not decrypt.
+            let p = provider();
+            let (private_key, _) = kat_keys();
+            assert!(p
+                .rsa_oaep_decrypt(
+                    &private_key,
+                    &unhex(KAT_OAEP_SHA256_LABELLED_CT),
+                    HashAlgorithm::Sha256,
+                    Some(&[0x00, 0xff, 0x11]),
+                )
+                .is_err());
+        }
+
+        #[test]
+        fn test_rsa_oaep_binary_label_round_trip() {
+            let p = provider();
+            let (private_key, public_key) = kat_keys();
+            let label: &[u8] = &[0x00, 0x01, 0xfe, 0xff, 0x00];
+            let ciphertext = p
+                .rsa_oaep_encrypt(&public_key, b"payload", HashAlgorithm::Sha256, Some(label))
+                .unwrap();
+            let plaintext = p
+                .rsa_oaep_decrypt(&private_key, &ciphertext, HashAlgorithm::Sha256, Some(label))
+                .unwrap();
+            assert_eq!(plaintext, b"payload");
+        }
+
+        #[test]
+        fn test_rsa_pss_non_default_salt_length_round_trip() {
+            // WebCrypto lets the caller choose saltLength; 20 is not the digest length.
+            let p = provider();
+            let (private_key, public_key) = kat_keys();
+            let mut digest = p.digest(HashAlgorithm::Sha256);
+            digest.update(KAT_MESSAGE);
+            let hash = digest.finalize();
+
+            let signature = p
+                .rsa_pss_sign(&private_key, &hash, 20, HashAlgorithm::Sha256)
+                .unwrap();
+            assert!(p
+                .rsa_pss_verify(&public_key, &signature, &hash, 20, HashAlgorithm::Sha256)
+                .unwrap());
+            // A verifier expecting a different salt length must reject it.
+            assert!(!p
+                .rsa_pss_verify(&public_key, &signature, &hash, 32, HashAlgorithm::Sha256)
+                .unwrap());
+        }
+
+        #[test]
+        fn test_rsa_generate_key_with_exponent_3() {
+            let p = provider();
+            let (private_key, public_key) = p.generate_rsa_key(2048, &[0x03]).unwrap();
+            let imported = p.import_rsa_public_key_pkcs1(&public_key).unwrap();
+            assert_eq!(imported.public_exponent, vec![0x03]);
+            assert_eq!(imported.modulus_length, 2048);
+            assert!(!private_key.is_empty());
+        }
+
+        #[test]
+        fn test_rsa_malformed_private_key_is_rejected() {
+            let p = provider();
+            let mut digest = p.digest(HashAlgorithm::Sha256);
+            digest.update(KAT_MESSAGE);
+            let hash = digest.finalize();
+
+            for bad in [b"".as_slice(), b"not der at all".as_slice(), &[0x30, 0x82, 0xff, 0xff]] {
+                assert!(p
+                    .rsa_pkcs1v15_sign(bad, &hash, HashAlgorithm::Sha256)
+                    .is_err());
+                assert!(p.import_rsa_private_key_pkcs1(bad).is_err());
+            }
+        }
+
+        #[test]
+        fn test_rsa_malformed_public_key_is_rejected() {
+            let p = provider();
+            for bad in [b"".as_slice(), b"not der at all".as_slice(), &[0x30, 0x82, 0xff, 0xff]] {
+                assert!(p.import_rsa_public_key_pkcs1(bad).is_err());
+                assert!(p
+                    .rsa_oaep_encrypt(bad, b"x", HashAlgorithm::Sha256, None)
+                    .is_err());
+            }
+        }
+
+        #[test]
+        fn test_rsa_malformed_signature_is_rejected() {
+            let p = provider();
+            let (_, public_key) = kat_keys();
+            let mut digest = p.digest(HashAlgorithm::Sha256);
+            digest.update(KAT_MESSAGE);
+            let hash = digest.finalize();
+
+            let mut tampered = unhex(KAT_PKCS1V15_SHA256_SIG);
+            tampered[0] ^= 0x01;
+            assert!(!p
+                .rsa_pkcs1v15_verify(&public_key, &tampered, &hash, HashAlgorithm::Sha256)
+                .unwrap());
+
+            // Truncated and empty signatures must be rejected, not panic.
+            assert!(!p
+                .rsa_pkcs1v15_verify(&public_key, &[], &hash, HashAlgorithm::Sha256)
+                .unwrap());
+            assert!(!p
+                .rsa_pkcs1v15_verify(&public_key, &tampered[..128], &hash, HashAlgorithm::Sha256)
+                .unwrap());
+        }
+
+        #[test]
+        fn test_rsa_malformed_ciphertext_is_rejected() {
+            let p = provider();
+            let (private_key, _) = kat_keys();
+            let mut tampered = unhex(KAT_OAEP_SHA256_LABELLED_CT);
+            tampered[0] ^= 0x01;
+            assert!(p
+                .rsa_oaep_decrypt(
+                    &private_key,
+                    &tampered,
+                    HashAlgorithm::Sha256,
+                    Some(KAT_OAEP_LABEL)
+                )
+                .is_err());
+            assert!(p
+                .rsa_oaep_decrypt(&private_key, &[], HashAlgorithm::Sha256, Some(KAT_OAEP_LABEL))
+                .is_err());
+        }
+
         #[test]
         fn test_rsa_pss_sign_verify() {
             let p = provider();

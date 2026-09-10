@@ -45,16 +45,17 @@ use p521::{
 };
 use pbkdf2::pbkdf2;
 use pkcs8::{DecodePrivateKey, EncodePrivateKey};
-use rsa::pkcs1::{
-    DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
-};
-use rsa::signature::hazmat::PrehashSigner;
-use rsa::{
-    pss::Pss,
-    sha2::{Digest, Sha256, Sha384, Sha512},
-    BoxedUint, Oaep, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
-};
+use std::ffi::c_int;
+
+use ecdsa::signature::hazmat::PrehashSigner;
+use openssl::bn::BigNum;
+use openssl::md::{Md, MdRef};
+use openssl::pkey::PKey;
+use openssl::pkey_ctx::PkeyCtx;
+use openssl::rsa::{Padding, Rsa};
+use openssl::sign::RsaPssSaltlen;
 use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::crypto::{
     hash::HashAlgorithm,
@@ -66,6 +67,45 @@ use crate::crypto::{
 };
 
 use aes_variants::AesGcmVariant;
+
+fn rsa_md(hash_alg: HashAlgorithm) -> Result<&'static MdRef, CryptoError> {
+    match hash_alg {
+        HashAlgorithm::Sha1 => Ok(Md::sha1()),
+        HashAlgorithm::Sha256 => Ok(Md::sha256()),
+        HashAlgorithm::Sha384 => Ok(Md::sha384()),
+        HashAlgorithm::Sha512 => Ok(Md::sha512()),
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn rsa_private_key(private_key_der: &[u8]) -> Result<PKey<openssl::pkey::Private>, CryptoError> {
+    let rsa = Rsa::private_key_from_der(private_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
+    PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))
+}
+
+fn rsa_public_key(public_key_der: &[u8]) -> Result<PKey<openssl::pkey::Public>, CryptoError> {
+    let rsa =
+        Rsa::public_key_from_der_pkcs1(public_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
+    PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))
+}
+
+// An empty label and an absent one are the same input to OAEP, and OpenSSL
+// rejects a zero-length label rather than treating it as absent.
+fn rsa_configure_oaep<T>(
+    ctx: &mut PkeyCtx<T>,
+    md: &'static MdRef,
+    label: Option<&[u8]>,
+) -> Result<(), openssl::error::ErrorStack> {
+    ctx.set_rsa_padding(Padding::PKCS1_OAEP)?;
+    ctx.set_rsa_oaep_md(md)?;
+    ctx.set_rsa_mgf1_md(md)?;
+    if let Some(label) = label {
+        if !label.is_empty() {
+            ctx.set_rsa_oaep_label(label)?;
+        }
+    }
+    Ok(())
+}
 
 impl From<aes::cipher::InvalidLength> for CryptoError {
     fn from(_: aes::cipher::InvalidLength) -> Self {
@@ -277,25 +317,23 @@ impl CryptoProvider for RustCryptoProvider {
         salt_length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut rng = rand::rng();
-        let private_key = RsaPrivateKey::from_pkcs1_der(private_key_der)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => private_key
-                .sign_with_rng(&mut rng, Pss::<Sha1>::new_with_salt(salt_length), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha256 => private_key
-                .sign_with_rng(&mut rng, Pss::<Sha256>::new_with_salt(salt_length), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha384 => private_key
-                .sign_with_rng(&mut rng, Pss::<Sha384>::new_with_salt(salt_length), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha512 => private_key
-                .sign_with_rng(&mut rng, Pss::<Sha512>::new_with_salt(salt_length), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_private_key(private_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.sign_init().map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.set_rsa_padding(Padding::PKCS1_PSS)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.set_signature_md(md)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.set_rsa_mgf1_md(md)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        let salt = c_int::try_from(salt_length).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
+        ctx.set_rsa_pss_saltlen(RsaPssSaltlen::custom(salt))
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        let mut signature = Vec::new();
+        ctx.sign_to_vec(digest, &mut signature)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        Ok(signature)
     }
 
     fn rsa_pss_verify(
@@ -306,24 +344,20 @@ impl CryptoProvider for RustCryptoProvider {
         salt_length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<bool, CryptoError> {
-        let public_key = RsaPublicKey::from_pkcs1_der(public_key_der)
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_public_key(public_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::InvalidKey(None))?;
+        ctx.verify_init().map_err(|_| CryptoError::InvalidKey(None))?;
+        ctx.set_rsa_padding(Padding::PKCS1_PSS)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => Ok(public_key
-                .verify(Pss::<Sha1>::new_with_salt(salt_length), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha256 => Ok(public_key
-                .verify(Pss::<Sha256>::new_with_salt(salt_length), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha384 => Ok(public_key
-                .verify(Pss::<Sha384>::new_with_salt(salt_length), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha512 => Ok(public_key
-                .verify(Pss::<Sha512>::new_with_salt(salt_length), digest, signature)
-                .is_ok()),
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        ctx.set_signature_md(md)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        ctx.set_rsa_mgf1_md(md)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let salt = c_int::try_from(salt_length).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
+        ctx.set_rsa_pss_saltlen(RsaPssSaltlen::custom(salt))
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        Ok(ctx.verify(digest, signature).unwrap_or(false))
     }
 
     fn rsa_pkcs1v15_sign(
@@ -332,25 +366,18 @@ impl CryptoProvider for RustCryptoProvider {
         digest: &[u8],
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut rng = rand::rng();
-        let private_key = RsaPrivateKey::from_pkcs1_der(private_key_der)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => private_key
-                .sign_with_rng(&mut rng, Pkcs1v15Sign::new::<Sha1>(), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha256 => private_key
-                .sign_with_rng(&mut rng, Pkcs1v15Sign::new::<Sha256>(), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha384 => private_key
-                .sign_with_rng(&mut rng, Pkcs1v15Sign::new::<Sha384>(), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            HashAlgorithm::Sha512 => private_key
-                .sign_with_rng(&mut rng, Pkcs1v15Sign::new::<Sha512>(), digest)
-                .map_err(|_| CryptoError::SigningFailed(None)),
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_private_key(private_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.sign_init().map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.set_rsa_padding(Padding::PKCS1)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        ctx.set_signature_md(md)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        let mut signature = Vec::new();
+        ctx.sign_to_vec(digest, &mut signature)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        Ok(signature)
     }
 
     fn rsa_pkcs1v15_verify(
@@ -360,24 +387,15 @@ impl CryptoProvider for RustCryptoProvider {
         digest: &[u8],
         hash_alg: HashAlgorithm,
     ) -> Result<bool, CryptoError> {
-        let public_key = RsaPublicKey::from_pkcs1_der(public_key_der)
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_public_key(public_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::InvalidKey(None))?;
+        ctx.verify_init().map_err(|_| CryptoError::InvalidKey(None))?;
+        ctx.set_rsa_padding(Padding::PKCS1)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => Ok(public_key
-                .verify(Pkcs1v15Sign::new::<Sha1>(), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha256 => Ok(public_key
-                .verify(Pkcs1v15Sign::new::<Sha256>(), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha384 => Ok(public_key
-                .verify(Pkcs1v15Sign::new::<Sha384>(), digest, signature)
-                .is_ok()),
-            HashAlgorithm::Sha512 => Ok(public_key
-                .verify(Pkcs1v15Sign::new::<Sha512>(), digest, signature)
-                .is_ok()),
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        ctx.set_signature_md(md)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        Ok(ctx.verify(digest, signature).unwrap_or(false))
     }
 
     fn rsa_oaep_encrypt(
@@ -387,57 +405,16 @@ impl CryptoProvider for RustCryptoProvider {
         hash_alg: HashAlgorithm,
         label: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut rng = rand::rng();
-        let public_key = RsaPublicKey::from_pkcs1_der(public_key_der)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => {
-                let mut padding = Oaep::<Sha1>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                public_key
-                    .encrypt(&mut rng, padding, data)
-                    .map_err(|_| CryptoError::EncryptionFailed(None))
-            },
-            HashAlgorithm::Sha256 => {
-                let mut padding = Oaep::<Sha256>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                public_key
-                    .encrypt(&mut rng, padding, data)
-                    .map_err(|_| CryptoError::EncryptionFailed(None))
-            },
-            HashAlgorithm::Sha384 => {
-                let mut padding = Oaep::<Sha384>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                public_key
-                    .encrypt(&mut rng, padding, data)
-                    .map_err(|_| CryptoError::EncryptionFailed(None))
-            },
-            HashAlgorithm::Sha512 => {
-                let mut padding = Oaep::<Sha512>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                public_key
-                    .encrypt(&mut rng, padding, data)
-                    .map_err(|_| CryptoError::EncryptionFailed(None))
-            },
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_public_key(public_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::EncryptionFailed(None))?;
+        ctx.encrypt_init()
+            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        rsa_configure_oaep(&mut ctx, md, label).map_err(|_| CryptoError::EncryptionFailed(None))?;
+        let mut out = Vec::new();
+        ctx.encrypt_to_vec(data, &mut out)
+            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        Ok(out)
     }
 
     fn rsa_oaep_decrypt(
@@ -447,56 +424,16 @@ impl CryptoProvider for RustCryptoProvider {
         hash_alg: HashAlgorithm,
         label: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let private_key = RsaPrivateKey::from_pkcs1_der(private_key_der)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => {
-                let mut padding = Oaep::<Sha1>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                private_key
-                    .decrypt(padding, data)
-                    .map_err(|_| CryptoError::DecryptionFailed(None))
-            },
-            HashAlgorithm::Sha256 => {
-                let mut padding = Oaep::<Sha256>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                private_key
-                    .decrypt(padding, data)
-                    .map_err(|_| CryptoError::DecryptionFailed(None))
-            },
-            HashAlgorithm::Sha384 => {
-                let mut padding = Oaep::<Sha384>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                private_key
-                    .decrypt(padding, data)
-                    .map_err(|_| CryptoError::DecryptionFailed(None))
-            },
-            HashAlgorithm::Sha512 => {
-                let mut padding = Oaep::<Sha512>::new();
-                if let Some(l) = label {
-                    if !l.is_empty() {
-                        padding.label = Some(l.into());
-                    }
-                }
-                private_key
-                    .decrypt(padding, data)
-                    .map_err(|_| CryptoError::DecryptionFailed(None))
-            },
-            _ => Err(CryptoError::UnsupportedAlgorithm),
-        }
+        let md = rsa_md(hash_alg)?;
+        let key = rsa_private_key(private_key_der)?;
+        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::DecryptionFailed(None))?;
+        ctx.decrypt_init()
+            .map_err(|_| CryptoError::DecryptionFailed(None))?;
+        rsa_configure_oaep(&mut ctx, md, label).map_err(|_| CryptoError::DecryptionFailed(None))?;
+        let mut out = Vec::new();
+        ctx.decrypt_to_vec(data, &mut out)
+            .map_err(|_| CryptoError::DecryptionFailed(None))?;
+        Ok(out)
     }
 
     fn ecdh_derive_bits(
@@ -962,24 +899,17 @@ impl CryptoProvider for RustCryptoProvider {
         public_exponent: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
         let exponent = parse_rsa_public_exponent(public_exponent)?;
-
-        let exp = BoxedUint::from(exponent);
-        let mut rng = rand::rng();
-        let rsa_private_key = RsaPrivateKey::new_with_exp(&mut rng, modulus_length as usize, exp)
+        let e = BigNum::from_u32(u32::try_from(exponent).map_err(|_| CryptoError::OperationFailed(None))?)
             .map_err(|_| CryptoError::OperationFailed(None))?;
-
-        let public_key = rsa_private_key
-            .to_public_key()
-            .to_pkcs1_der()
+        let key = Rsa::generate_with_e(modulus_length, &e)
             .map_err(|_| CryptoError::OperationFailed(None))?;
-        let private_key = rsa_private_key
-            .to_pkcs1_der()
+        let private_key = key
+            .private_key_to_der()
             .map_err(|_| CryptoError::OperationFailed(None))?;
-
-        Ok((
-            private_key.as_bytes().to_vec(),
-            public_key.as_bytes().to_vec(),
-        ))
+        let public_key = key
+            .public_key_to_der_pkcs1()
+            .map_err(|_| CryptoError::OperationFailed(None))?;
+        Ok((private_key, public_key))
     }
 
     fn import_rsa_public_key_pkcs1(
@@ -988,7 +918,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
         let public_key =
-            rsa::pkcs1::RsaPublicKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+            pkcs1::RsaPublicKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
         let key_data = public_key
@@ -1008,7 +938,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
         let private_key =
-            rsa::pkcs1::RsaPrivateKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+            pkcs1::RsaPrivateKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
         let key_data = private_key
@@ -1029,7 +959,7 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let spki = spki::SubjectPublicKeyInfoRef::try_from(der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        let public_key = rsa::pkcs1::RsaPublicKey::from_der(spki.subject_public_key.raw_bytes())
+        let public_key = pkcs1::RsaPublicKey::from_der(spki.subject_public_key.raw_bytes())
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
@@ -1051,7 +981,7 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let pk_info =
             pkcs8::PrivateKeyInfoRef::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
-        let private_key = rsa::pkcs1::RsaPrivateKey::from_der(pk_info.private_key.as_bytes())
+        let private_key = pkcs1::RsaPrivateKey::from_der(pk_info.private_key.as_bytes())
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
@@ -1071,7 +1001,7 @@ impl CryptoProvider for RustCryptoProvider {
 
     fn export_rsa_public_key_spki(&self, key_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use der::{Decode, Encode};
-        let public_key = rsa::pkcs1::RsaPublicKey::from_der(key_data)
+        let public_key = pkcs1::RsaPublicKey::from_der(key_data)
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let spki = spki::SubjectPublicKeyInfo {
             algorithm: spki::AlgorithmIdentifier::<der::asn1::Any> {
@@ -1089,11 +1019,10 @@ impl CryptoProvider for RustCryptoProvider {
     }
 
     fn export_rsa_private_key_pkcs8(&self, key_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let private_key =
-            RsaPrivateKey::from_pkcs1_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
-        private_key
-            .to_pkcs8_der()
-            .map(|doc| doc.as_bytes().to_vec())
+        let rsa = Rsa::private_key_from_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
+        let key = PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))?;
+        key
+            .private_key_to_pkcs8()
             .map_err(|_| CryptoError::InvalidKey(None))
     }
 
@@ -1376,7 +1305,7 @@ impl CryptoProvider for RustCryptoProvider {
         if let (Some(d), Some(p), Some(q), Some(dp), Some(dq), Some(qi)) =
             (jwk.d, jwk.p, jwk.q, jwk.dp, jwk.dq, jwk.qi)
         {
-            let private_key = rsa::pkcs1::RsaPrivateKey {
+            let private_key = pkcs1::RsaPrivateKey {
                 modulus,
                 public_exponent,
                 private_exponent: UintRef::new(d).map_err(|_| CryptoError::InvalidKey(None))?,
@@ -1396,7 +1325,7 @@ impl CryptoProvider for RustCryptoProvider {
                 is_private: true,
             })
         } else {
-            let public_key = rsa::pkcs1::RsaPublicKey {
+            let public_key = pkcs1::RsaPublicKey {
                 modulus,
                 public_exponent,
             };
@@ -1418,7 +1347,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaJwkExport, CryptoError> {
         use der::Decode;
         if is_private {
-            let key = rsa::pkcs1::RsaPrivateKey::from_der(key_data)
+            let key = pkcs1::RsaPrivateKey::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),
@@ -1431,7 +1360,7 @@ impl CryptoProvider for RustCryptoProvider {
                 qi: Some(key.coefficient.as_bytes().to_vec()),
             })
         } else {
-            let key = rsa::pkcs1::RsaPublicKey::from_der(key_data)
+            let key = pkcs1::RsaPublicKey::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),
