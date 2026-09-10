@@ -1,0 +1,18 @@
+# `crates/ferrijs-std` is vendored llrt, kept byte-close to upstream so a
+# re-sync stays a readable diff. Its spelling is upstream's to fix, and
+# correcting it here would put noise in that diff, which is the same reason
+# the `Documentation` job excludes the crate.
+[files]
+extend-exclude = ["crates/ferrijs-std/"]
+
+# `ser` is a real module (`crates/ferrijs-serde/src/ser.rs`), the serde
+# convention for a serializer, not a misspelling of "set".
+[default.extend-words]
+ser = "ser"
+# `styl` is Stylus's file extension, matched by the bundler alongside
+# `scss` and `sass`.
+styl = "styl"
+# `ResolveablePromise` is upstream llrt's type, spelled that way in the
+# vendored tree; our callers have to name it as it is spelled there.
+resolveable = "resolveable"
+Resolveable = "Resolveable"

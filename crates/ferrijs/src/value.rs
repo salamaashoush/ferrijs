@@ -216,7 +216,7 @@ fn f64_as_exact_i32(n: f64) -> Option<i32> {
 /// `valueOf()` (a returned `Date` still serialises as its ISO string),
 /// coerces whole f64 in the safe-integer range to `i64`, drops
 /// `undefined` / function / symbol, and renders non-finite as null.
-/// [`JsonValue`] is what receives it, and says there why
+/// The private `JsonValue` is what receives it, and says there why
 /// `serde_json::Value`'s own `Deserialize` cannot.
 #[must_use]
 pub fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {

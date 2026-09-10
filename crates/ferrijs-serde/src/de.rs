@@ -894,13 +894,13 @@ mod tests {
         rt.context().with(|cx| {
             cx.eval::<Value<'_>, _>(
                 r#"
-                var unitialized;
+                var uninitialized;
                 var a = {
                     a: undefined,
                     b: function() {},
                     c: Symbol(),
                     d: () => {},
-                    e: unitialized,
+                    e: uninitialized,
                 };"#,
             )
             .unwrap();
@@ -917,13 +917,13 @@ mod tests {
         rt.context().with(|cx| {
             cx.eval::<Value<'_>, _>(
                 r#"
-                var unitialized;
+                var uninitialized;
                 var a = [
                     undefined,
                     function() {},
                     Symbol(),
                     () => {},
-                    unitialized,
+                    uninitialized,
                 ];"#,
             )
             .unwrap();

@@ -188,7 +188,7 @@ mod tests {
         }
 
         // This test is not representative of what is happening in the real world. Since we are transcoding
-        // from msgpack, only values greather than or equal to u32::MAX would be serialized as `BigInt`. Any other values would
+        // from msgpack, only values greater than or equal to u32::MAX would be serialized as `BigInt`. Any other values would
         // be serialized as a `number`.
         //
         // See https://github.com/3Hren/msgpack-rust/blob/aa3c4a77b2b901fe73a555c615b92773b40905fc/rmp/src/encode/sint.rs#L170.
