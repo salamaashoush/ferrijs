@@ -83,7 +83,13 @@ jobs:
       # `ferrijs-std` is excluded: it is vendored llrt, and its intra-doc
       # links are upstream's to fix. Holding it to `-Dwarnings` would mean
       # editing the tree a re-sync has to diff against.
-      - run: cargo doc --workspace --exclude ferrijs-std --all-features --no-deps
+      #
+      # `ferrijs-cli` is excluded because its binary is named `ferrijs`, so
+      # rustdoc writes it to the same `target/doc/ferrijs` the `ferrijs` lib
+      # uses. The two racing to create that directory fails the job with an
+      # I/O error, and the binary has no documentation worth publishing.
+      # Renaming the binary is not an option: it is the command's name.
+      - run: cargo doc --workspace --exclude ferrijs-std --exclude ferrijs-cli --all-features --no-deps
 
   basics:
     name: Basics gate
