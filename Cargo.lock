@@ -867,9 +867,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
- "digest",
  "fiat-crypto",
- "rand_core",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -1050,32 +1048,6 @@ dependencies = [
  "rfc6979",
  "signature",
  "spki",
- "zeroize",
-]
-
-[[package]]
-name = "ed25519"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
-dependencies = [
- "pkcs8",
- "signature",
-]
-
-[[package]]
-name = "ed25519-dalek"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
-dependencies = [
- "curve25519-dalek",
- "ed25519",
- "rand_core",
- "serde",
- "sha2",
- "signature",
- "subtle",
  "zeroize",
 ]
 
@@ -1296,10 +1268,7 @@ dependencies = [
  "crc32c",
  "crc32fast",
  "cshake",
- "ctutils",
  "der",
- "ecdsa",
- "ed25519-dalek",
  "either",
  "elliptic-curve",
  "ferrijs-permissions",
@@ -1319,7 +1288,6 @@ dependencies = [
  "openssl",
  "p256",
  "p384",
- "p521",
  "percent-encoding",
  "phf",
  "pkcs1",
@@ -3014,20 +2982,6 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "fiat-crypto",
- "primefield",
- "primeorder",
- "sha2",
-]
-
-[[package]]
-name = "p521"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ad64cc32c2dc466317c12ee5853e61f159f9eab1fe7efade0395dc2e7b43449"
-dependencies = [
- "base16ct",
- "ecdsa",
- "elliptic-curve",
  "primefield",
  "primeorder",
  "sha2",

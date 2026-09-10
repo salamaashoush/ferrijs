@@ -10,7 +10,6 @@ use der::{
     Decode, Encode,
 };
 #[cfg(feature = "_subtle-full")]
-use ed25519_dalek::SigningKey;
 #[cfg(feature = "_subtle-full")]
 use crate::encoding::bytes_from_b64_url_safe;
 use crate::exceptions::DOMException;
@@ -25,8 +24,6 @@ use rquickjs::{
 };
 #[cfg(feature = "_subtle-full")]
 use spki::{AlgorithmIdentifier, ObjectIdentifier};
-#[cfg(feature = "_subtle-full")]
-use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::crypto::{
     hash::HashAlgorithm,
@@ -2227,17 +2224,14 @@ fn validate_okp_jwk_key_pair<'js>(
     public_key: &[u8],
     is_ed25519: bool,
 ) -> Result<()> {
-    let derived_public_key = if is_ed25519 {
-        let secret_key: [u8; 32] = private_key.try_into().or_throw_data_error(ctx)?;
-        SigningKey::from_bytes(&secret_key)
-            .verifying_key()
-            .to_bytes()
-            .to_vec()
+    let id = if is_ed25519 {
+        openssl::pkey::Id::ED25519
     } else {
-        let secret_key: [u8; 32] = private_key.try_into().or_throw_data_error(ctx)?;
-        let secret = StaticSecret::from(secret_key);
-        PublicKey::from(&secret).as_bytes().to_vec()
+        openssl::pkey::Id::X25519
     };
+    let derived_public_key = openssl::pkey::PKey::private_key_from_raw_bytes(private_key, id)
+        .and_then(|key| key.raw_public_key())
+        .or_throw_data_error(ctx)?;
     if derived_public_key.as_slice() != public_key {
         return Err(DOMException::data_error(ctx, "JWK key pair is invalid"));
     }

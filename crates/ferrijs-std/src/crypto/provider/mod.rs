@@ -1420,6 +1420,101 @@ mod tests {
             )
         }
 
+        // EC key formats and ECDH are deterministic, so they pin exactly what a
+        // backend swap could change quietly: the SEC1 point encoding, the SPKI
+        // wrapper, the PKCS#8 round trip, the JWK coordinate widths (P-521's
+        // are 66 bytes, left-padded) and the raw shared secret. Captured from
+        // the RustCrypto implementation this provider replaced.
+        struct EcVector {
+            curve: EllipticCurve,
+            private_pkcs8: &'static str,
+            public_sec1: &'static str,
+            public_spki: &'static str,
+            jwk_x: &'static str,
+            jwk_y: &'static str,
+            jwk_d: &'static str,
+            peer_sec1: &'static str,
+            ecdh: &'static str,
+        }
+
+        const EC_VECTORS: &[EcVector] = &[
+            EcVector {
+                curve: EllipticCurve::P256,
+                private_pkcs8: "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420d14161e04fe7dc1c104b1edf09339e996c26783f76a589a54b486f231f2978fca14403420004a35fe6aa124822ddeb972ec3e3ae6bfd8f6c3275a0f23a5bed975ff90b2459fe545c2e788559da140ec3a0968197066570d56aa0e293ca791445457b2aa61897",
+                public_sec1: "04a35fe6aa124822ddeb972ec3e3ae6bfd8f6c3275a0f23a5bed975ff90b2459fe545c2e788559da140ec3a0968197066570d56aa0e293ca791445457b2aa61897",
+                public_spki: "3059301306072a8648ce3d020106082a8648ce3d03010703420004a35fe6aa124822ddeb972ec3e3ae6bfd8f6c3275a0f23a5bed975ff90b2459fe545c2e788559da140ec3a0968197066570d56aa0e293ca791445457b2aa61897",
+                jwk_x: "a35fe6aa124822ddeb972ec3e3ae6bfd8f6c3275a0f23a5bed975ff90b2459fe",
+                jwk_y: "545c2e788559da140ec3a0968197066570d56aa0e293ca791445457b2aa61897",
+                jwk_d: "d14161e04fe7dc1c104b1edf09339e996c26783f76a589a54b486f231f2978fc",
+                peer_sec1: "04b9865604deed965b34b2a2d45661991b34e4eb6c9f9e0fde92c9f877a80a414533c63b7571d0473943c5a24a57f1ef78a0c18974381c5d89b62e28b0272a5b4b",
+                ecdh: "45e6029d23d4ee3791a09e156d0f5ba9d415d82a7cbe516bb6a9a3c503c231ea",
+            },
+            EcVector {
+                curve: EllipticCurve::P384,
+                private_pkcs8: "3081b6020100301006072a8648ce3d020106052b8104002204819e30819b0201010430056eb29c942483489dafbd6cc11692ec3402952397647cfd9f7ac29ee272f5118b2cadb26ce27815bf6f3aa2f0e82179a16403620004daea916a477a7c4bfa5703f3d97c59b28f32f511fa02b49d755bdfae38356f0a15edfc18be403fdb5acb3e4dd692e17bac5150c1d0d744563668ccc80f6ac32b856c13ae2b164e2699501b7c2b421d6cb4900215b04dc9d463b21e98ba61c681",
+                public_sec1: "04daea916a477a7c4bfa5703f3d97c59b28f32f511fa02b49d755bdfae38356f0a15edfc18be403fdb5acb3e4dd692e17bac5150c1d0d744563668ccc80f6ac32b856c13ae2b164e2699501b7c2b421d6cb4900215b04dc9d463b21e98ba61c681",
+                public_spki: "3076301006072a8648ce3d020106052b8104002203620004daea916a477a7c4bfa5703f3d97c59b28f32f511fa02b49d755bdfae38356f0a15edfc18be403fdb5acb3e4dd692e17bac5150c1d0d744563668ccc80f6ac32b856c13ae2b164e2699501b7c2b421d6cb4900215b04dc9d463b21e98ba61c681",
+                jwk_x: "daea916a477a7c4bfa5703f3d97c59b28f32f511fa02b49d755bdfae38356f0a15edfc18be403fdb5acb3e4dd692e17b",
+                jwk_y: "ac5150c1d0d744563668ccc80f6ac32b856c13ae2b164e2699501b7c2b421d6cb4900215b04dc9d463b21e98ba61c681",
+                jwk_d: "056eb29c942483489dafbd6cc11692ec3402952397647cfd9f7ac29ee272f5118b2cadb26ce27815bf6f3aa2f0e82179",
+                peer_sec1: "0429f85fd4b44b4997b5791a1cbc973f45e6effee2b1cbc659c59896d8536ea556a93a91ee3f744a0d27501bacea48e760dc1ab078bd747d95b8aafb3860f08a66fa826180c9b3a9613587b4e025d2d66031c23939f1e4763e83d24378dbd73c75",
+                ecdh: "814f4ccaa8b200f35696af511dae818abf0d970531c0b2017217b8bb3fa9d0d89d13926c80ec8d53eca4c6a9840f2d0f",
+            },
+            EcVector {
+                curve: EllipticCurve::P521,
+                private_pkcs8: "3081ee020100301006072a8648ce3d020106052b810400230481d63081d3020101044201e858f96577fbf091a1da211d9b8bfbe30dc4511e20bae50953c169c6ef5d8e474b63cea23a43770f5a3e9865e1b5b140c1fcb6f649d1270fd2a30bf4611a7a8422a18189038186000401564137ea4e3423f622847074f6bff0231e590a30d07702663d96713abbdbb947c7225f03a897ab516398a7210970a3378261c04ea6d03b2cf4e0b14ce00dc53d80011f3d59ddb9013ac28a65ed2d6ba9e624fae397d9a18b4624f232af1c58f3f82906d8771721c3895b18d7056e7de25e3e44bc6834d27a8266b78d0d08631906cecd",
+                public_sec1: "0401564137ea4e3423f622847074f6bff0231e590a30d07702663d96713abbdbb947c7225f03a897ab516398a7210970a3378261c04ea6d03b2cf4e0b14ce00dc53d80011f3d59ddb9013ac28a65ed2d6ba9e624fae397d9a18b4624f232af1c58f3f82906d8771721c3895b18d7056e7de25e3e44bc6834d27a8266b78d0d08631906cecd",
+                public_spki: "30819b301006072a8648ce3d020106052b81040023038186000401564137ea4e3423f622847074f6bff0231e590a30d07702663d96713abbdbb947c7225f03a897ab516398a7210970a3378261c04ea6d03b2cf4e0b14ce00dc53d80011f3d59ddb9013ac28a65ed2d6ba9e624fae397d9a18b4624f232af1c58f3f82906d8771721c3895b18d7056e7de25e3e44bc6834d27a8266b78d0d08631906cecd",
+                jwk_x: "01564137ea4e3423f622847074f6bff0231e590a30d07702663d96713abbdbb947c7225f03a897ab516398a7210970a3378261c04ea6d03b2cf4e0b14ce00dc53d80",
+                jwk_y: "011f3d59ddb9013ac28a65ed2d6ba9e624fae397d9a18b4624f232af1c58f3f82906d8771721c3895b18d7056e7de25e3e44bc6834d27a8266b78d0d08631906cecd",
+                jwk_d: "01e858f96577fbf091a1da211d9b8bfbe30dc4511e20bae50953c169c6ef5d8e474b63cea23a43770f5a3e9865e1b5b140c1fcb6f649d1270fd2a30bf4611a7a8422",
+                peer_sec1: "0400505cec9cb1bcaa62980d895fef02cd68aa244cc8d8ce32244ad2810dbfcf05ba8b42abb7eabf39f98c3185ea0d5689acf09e696d90e2f8a3b8faad0877ed9eb79600d05717bc2b63b914101e1fcf05cb3d3b6e77ccfaccd67d09c9b44702ad98f0146a6b2fcc98e4290b5d46c18d690a4f051396ea865a16b311b0f892121274c0b27f",
+                ecdh: "019706ee595096e2bb953771170013bc2b6669abfcc3c958a2894f590816c2c38f7d62ea4641bacceb46e8a869a026f26cb84cac798550ded20ec346a525541ce183",
+            },
+        ];
+
+        #[test]
+        fn test_ec_key_formats_and_ecdh_known_answers() {
+            let p = provider();
+            let hx = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            for v in EC_VECTORS {
+                let kd = unhex(v.private_pkcs8);
+
+                let sec1 = p.export_ec_public_key_sec1(&kd, v.curve, true).unwrap();
+                assert_eq!(hx(&sec1), v.public_sec1, "SEC1 point");
+
+                // SPKI export is only reached with public key data.
+                let spki = p.export_ec_public_key_spki(&sec1, v.curve).unwrap();
+                assert_eq!(hx(&spki), v.public_spki, "SPKI");
+
+                let pkcs8 = p.export_ec_private_key_pkcs8(&kd, v.curve).unwrap();
+                assert_eq!(hx(&pkcs8), v.private_pkcs8, "PKCS#8 round trip");
+
+                let jwk = p.export_ec_jwk(&kd, v.curve, true).unwrap();
+                assert_eq!(hx(&jwk.x), v.jwk_x, "JWK x");
+                assert_eq!(hx(&jwk.y), v.jwk_y, "JWK y");
+                assert_eq!(hx(jwk.d.as_deref().unwrap_or_default()), v.jwk_d, "JWK d");
+
+                let shared = p
+                    .ecdh_derive_bits(v.curve, &kd, &unhex(v.peer_sec1))
+                    .unwrap();
+                assert_eq!(hx(&shared), v.ecdh, "ECDH shared secret");
+
+                // A signature this provider produces must verify against the
+                // point it exported, whichever way the signature is encoded.
+                let digest = {
+                    let mut d = p.digest(HashAlgorithm::Sha256);
+                    d.update(b"ec vector message");
+                    d.finalize()
+                };
+                let sig = p.ecdsa_sign(v.curve, &kd, &digest).unwrap();
+                assert!(p.ecdsa_verify(v.curve, &sec1, &sig, &digest).unwrap());
+                let mut bad = sig.clone();
+                bad[0] ^= 0x01;
+                assert!(!p.ecdsa_verify(v.curve, &sec1, &bad, &digest).unwrap());
+            }
+        }
+
         #[test]
         fn test_rsa_pkcs1v15_known_answer() {
             let p = provider();

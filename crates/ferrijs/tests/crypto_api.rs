@@ -89,7 +89,12 @@ async fn hmac_sign_and_verify_round_trip() {
     const good = await crypto.subtle.verify('HMAC', key, sig, data);
     const tampered = new Uint8Array(sig); tampered[0] ^= 0xff;
     const bad = await crypto.subtle.verify('HMAC', key, tampered, data);
-    return { hex, good, bad, type: key.type, algo: key.algorithm.hash.name };
+    // A signature of the wrong length has to compare false rather than abort:
+    // the constant-time comparison underneath requires equal lengths.
+    const short = await crypto.subtle.verify('HMAC', key, sig.slice(0, 16), data);
+    const empty = await crypto.subtle.verify('HMAC', key, new Uint8Array(0), data);
+    const long = await crypto.subtle.verify('HMAC', key, new Uint8Array(64), data);
+    return { hex, good, bad, short, empty, long, type: key.type, algo: key.algorithm.hash.name };
   ",
   )
   .await;
@@ -99,6 +104,9 @@ async fn hmac_sign_and_verify_round_trip() {
       "hex": "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
       "good": true,
       "bad": false,
+      "short": false,
+      "empty": false,
+      "long": false,
       "type": "secret",
       "algo": "SHA-256"
     })

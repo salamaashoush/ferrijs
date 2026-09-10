@@ -3,7 +3,6 @@
 use std::future::Future;
 
 use crate::crypto::provider::{modern, CryptoError, CryptoProvider, HmacProvider};
-use ctutils::CtEq;
 use crate::utils::bytes::ObjectBytes;
 use rquickjs::{Class, Ctx, FromJs, Result, Value};
 
@@ -118,7 +117,11 @@ fn verify(
             hmac.update(data);
             let computed_signature = hmac.finalize();
 
-            computed_signature.as_slice().ct_eq(signature).to_bool()
+            // `memcmp::eq` asserts equal lengths, and `signature` is caller
+            // supplied, so the length is checked before the constant-time
+            // comparison rather than inside it.
+            computed_signature.len() == signature.len()
+                && openssl::memcmp::eq(computed_signature.as_slice(), signature)
         },
         SigningAlgorithm::MlDsa { variant, context } => {
             if !matches!(&key.algorithm, KeyAlgorithm::MlDsa(key_variant) if key_variant == variant)
