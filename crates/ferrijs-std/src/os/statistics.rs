@@ -135,7 +135,61 @@ fn cpu_times() -> Vec<CpuTimes> {
     out
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+// Windows accounts per-processor time only through the native query libuv also
+// uses; `GetSystemTimes` gives the machine total, not a figure per CPU. The
+// counters are in 100ns units, and `KernelTime` includes the idle time, so idle
+// comes out of it to leave what the kernel actually spent. Interrupt time is not
+// reported separately, which is what libuv puts 0 for here too.
+#[cfg(windows)]
+fn cpu_times() -> Vec<CpuTimes> {
+    use windows_sys::Wdk::System::SystemInformation::{
+        NtQuerySystemInformation, SystemProcessorPerformanceInformation,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
+
+    let count = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut info = vec![SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION::default(); count];
+    let bytes = std::mem::size_of_val(info.as_slice());
+    let Ok(length) = u32::try_from(bytes) else {
+        return Vec::new();
+    };
+    let mut returned: u32 = 0;
+
+    // SAFETY: the buffer holds `count` entries and `length` is its size in
+    // bytes, so the kernel cannot write past it. `returned` is a valid out
+    // pointer and says how much it actually filled.
+    let status = unsafe {
+        NtQuerySystemInformation(
+            SystemProcessorPerformanceInformation,
+            info.as_mut_ptr().cast(),
+            length,
+            &raw mut returned,
+        )
+    };
+    if status < 0 {
+        return Vec::new();
+    }
+
+    let entry_size = std::mem::size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>();
+    let filled = (returned as usize) / entry_size;
+    // 100ns ticks to milliseconds.
+    let ms = |ticks: i64| -> u64 { u64::try_from(ticks).unwrap_or(0) / 10_000 };
+    info.iter()
+        .take(filled.min(count))
+        .map(|cpu| CpuTimes {
+            user: ms(cpu.UserTime),
+            nice: 0,
+            sys: ms(cpu.KernelTime.saturating_sub(cpu.IdleTime)),
+            idle: ms(cpu.IdleTime),
+            irq: 0,
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn cpu_times() -> Vec<CpuTimes> {
     Vec::new()
 }
