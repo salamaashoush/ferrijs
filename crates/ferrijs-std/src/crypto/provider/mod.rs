@@ -1196,6 +1196,53 @@ mod tests {
             assert_eq!(decrypted, plaintext);
         }
 
+        // AES-CTR's `length` is the width of the counter field, and WebCrypto
+        // wraps only within that field. OpenSSL's own CTR always increments the
+        // full 128-bit block, so a 32-bit counter that wraps would diverge
+        // silently. These vectors were taken from the RustCrypto implementation
+        // this provider replaced, with a counter one short of wrapping its low
+        // 32 bits over a 3-block message, which is where the widths disagree.
+        const CTR_VECTORS: &[(usize, u32, &str)] = &[
+            (16, 32, "3fbf0b00d7febb5bd68bf816a3be5af7d4aa9e4069229bd7c7cc20451546cfd356edc038d0a61259"),
+            (16, 64, "3fbf0b00d7febb5bd68bf816a3be5af7d4aa9e4069229bd7c7cc20451546cfd333494050b418e836"),
+            (16, 128, "3fbf0b00d7febb5bd68bf816a3be5af7d4aa9e4069229bd7c7cc20451546cfd333494050b418e836"),
+            (24, 32, "a7f3a35f6b3d2c45a0e918a57fa97789af6e365c775920e6582c198c154e5c891fa21537d5ed233a"),
+            (24, 64, "a7f3a35f6b3d2c45a0e918a57fa97789af6e365c775920e6582c198c154e5c89bcc1519790650e23"),
+            (24, 128, "a7f3a35f6b3d2c45a0e918a57fa97789af6e365c775920e6582c198c154e5c89bcc1519790650e23"),
+            (32, 32, "405d14fcebc697d024aa171141692dd9d14ea0bdbba3da73e60e24a419b89d6ebe920798b8a29fca"),
+            (32, 64, "405d14fcebc697d024aa171141692dd9d14ea0bdbba3da73e60e24a419b89d6ef6da045478eb0843"),
+            (32, 128, "405d14fcebc697d024aa171141692dd9d14ea0bdbba3da73e60e24a419b89d6ef6da045478eb0843"),
+        ];
+
+        fn ctr_vector_iv() -> Vec<u8> {
+            let mut iv: Vec<u8> = (0u8..16).map(|i| i.wrapping_mul(17)).collect();
+            iv[12] = 0xff;
+            iv[13] = 0xff;
+            iv[14] = 0xff;
+            iv[15] = 0xfe;
+            iv
+        }
+
+        #[test]
+        fn test_aes_ctr_counter_width_known_answers() {
+            let p = provider();
+            let data: Vec<u8> = (0u8..40).collect();
+            let iv = ctr_vector_iv();
+            for (klen, clen, want) in CTR_VECTORS {
+                let key: Vec<u8> = (0..*klen).map(|i| i as u8).collect();
+                let got = p
+                    .aes_encrypt(AesMode::Ctr { counter_length: *clen }, &key, &iv, &data, None)
+                    .unwrap();
+                let got_hex: String = got.iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(&got_hex, want, "AES-{}-CTR length={}", klen * 8, clen);
+
+                let back = p
+                    .aes_decrypt(AesMode::Ctr { counter_length: *clen }, &key, &iv, &got, None)
+                    .unwrap();
+                assert_eq!(back, data, "AES-{}-CTR length={} round trip", klen * 8, clen);
+            }
+        }
+
         #[test]
         fn test_aes_ctr_roundtrip() {
             let p = provider();

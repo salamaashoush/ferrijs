@@ -1,30 +1,15 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod aes_variants;
-
 use std::num::NonZeroU32;
 
-use aes::cipher::{
-    block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, StreamCipher,
-    StreamCipherError,
-};
-use aes_gcm::{
-    aead::{Aead, Payload},
-    KeyInit, Nonce,
-};
-use aes_kw::{KwAes128, KwAes192, KwAes256};
-use cbc::{Decryptor, Encryptor};
-use ctr::{cipher::Array, Ctr128BE, Ctr32BE, Ctr64BE};
 use der::{
     asn1::{BitStringRef, OctetString, OctetStringRef},
     Decode, Encode,
 };
 use ecdsa::signature::hazmat::PrehashVerifier;
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
-use elliptic_curve::{consts::U12, sec1::ToSec1Point, Generate};
-use hkdf::Hkdf;
-use hmac::{Hmac as HmacImpl, Mac};
+use elliptic_curve::{sec1::ToSec1Point, Generate};
 use p256::{
     ecdsa::{
         Signature as P256Signature, SigningKey as P256SigningKey, VerifyingKey as P256VerifyingKey,
@@ -43,19 +28,21 @@ use p521::{
     },
     SecretKey as P521SecretKey,
 };
-use pbkdf2::pbkdf2;
 use pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use std::ffi::c_int;
 
 use ecdsa::signature::hazmat::PrehashSigner;
 use openssl::bn::BigNum;
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::cipher::{Cipher as OsslCipher, CipherRef};
+use openssl::cipher_ctx::{CipherCtx, CipherCtxFlags};
+use openssl::symm::{Cipher, Crypter, Mode};
+use openssl::md_ctx::MdCtx;
 use openssl::md::{Md, MdRef};
-use openssl::pkey::PKey;
+use openssl::pkey::{PKey, Private};
 use openssl::pkey_ctx::PkeyCtx;
 use openssl::rsa::{Padding, Rsa};
 use openssl::sign::RsaPssSaltlen;
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::crypto::{
     hash::HashAlgorithm,
@@ -66,7 +53,172 @@ use crate::crypto::{
     subtle::EllipticCurve,
 };
 
-use aes_variants::AesGcmVariant;
+fn aes_cbc_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
+    match key_len {
+        16 => Ok(Cipher::aes_128_cbc()),
+        24 => Ok(Cipher::aes_192_cbc()),
+        32 => Ok(Cipher::aes_256_cbc()),
+        _ => Err(CryptoError::InvalidKey(None)),
+    }
+}
+
+fn aes_gcm_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
+    match key_len {
+        16 => Ok(Cipher::aes_128_gcm()),
+        24 => Ok(Cipher::aes_192_gcm()),
+        32 => Ok(Cipher::aes_256_gcm()),
+        _ => Err(CryptoError::InvalidKey(None)),
+    }
+}
+
+fn aes_ecb_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
+    match key_len {
+        16 => Ok(Cipher::aes_128_ecb()),
+        24 => Ok(Cipher::aes_192_ecb()),
+        32 => Ok(Cipher::aes_256_ecb()),
+        _ => Err(CryptoError::InvalidKey(None)),
+    }
+}
+
+fn aes_kw_cipher(kek_len: usize) -> Result<&'static CipherRef, CryptoError> {
+    match kek_len {
+        16 => Ok(OsslCipher::aes_128_wrap()),
+        24 => Ok(OsslCipher::aes_192_wrap()),
+        32 => Ok(OsslCipher::aes_256_wrap()),
+        _ => Err(CryptoError::InvalidKey(None)),
+    }
+}
+
+// The tag lengths WebCrypto allows for AES-GCM.
+fn aes_gcm_tag_len(tag_length: u8) -> Result<usize, CryptoError> {
+    match tag_length {
+        32 | 64 | 96 | 104 | 112 | 120 | 128 => Ok(usize::from(tag_length) / 8),
+        _ => Err(CryptoError::InvalidKey(None)),
+    }
+}
+
+fn openssl_crypt(
+    cipher: Cipher,
+    mode: Mode,
+    key: &[u8],
+    iv: Option<&[u8]>,
+    data: &[u8],
+    pad: bool,
+) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    let mut crypter = Crypter::new(cipher, mode, key, iv)?;
+    crypter.pad(pad);
+    let mut out = vec![0u8; data.len() + cipher.block_size()];
+    let count = crypter.update(data, &mut out)?;
+    let rest = crypter.finalize(&mut out[count..])?;
+    out.truncate(count + rest);
+    Ok(out)
+}
+
+// OpenSSL gates its key-wrap ciphers behind an explicit flag, and passing no
+// IV selects RFC 3394's default integrity value, which is the one WebCrypto's
+// AES-KW specifies.
+fn aes_kw_crypt(
+    cipher: &'static CipherRef,
+    encrypt: bool,
+    kek: &[u8],
+    data: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, CryptoError> {
+    let mut ctx = CipherCtx::new().map_err(|_| CryptoError::OperationFailed(None))?;
+    ctx.set_flags(CipherCtxFlags::FLAG_WRAP_ALLOW);
+    if encrypt {
+        ctx.encrypt_init(Some(cipher), Some(kek), None)
+    } else {
+        ctx.decrypt_init(Some(cipher), Some(kek), None)
+    }
+    .map_err(|_| CryptoError::InvalidKey(None))?;
+    ctx.set_padding(false);
+    let mut out = Vec::with_capacity(out_len + cipher.block_size());
+    ctx.cipher_update_vec(data, &mut out)
+        .map_err(|_| CryptoError::OperationFailed(None))?;
+    ctx.cipher_final_vec(&mut out)
+        .map_err(|_| CryptoError::OperationFailed(None))?;
+    if out.len() != out_len {
+        return Err(CryptoError::OperationFailed(None));
+    }
+    Ok(out)
+}
+
+// WebCrypto's AES-CTR `length` is the width of the counter field, and the
+// counter wraps inside that field alone. OpenSSL's own CTR mode always
+// increments the whole 128-bit block, so it cannot express a 32- or 64-bit
+// counter; the keystream is built here from ECB instead, which is what CTR is
+// defined as, with the increment applied at the requested width.
+fn ctr_increment(block: &mut [u8; 16], counter_length: u32) {
+    let start = 16 - (counter_length as usize / 8);
+    for byte in block[start..].iter_mut().rev() {
+        let (next, carry) = byte.overflowing_add(1);
+        *byte = next;
+        if !carry {
+            break;
+        }
+    }
+}
+
+fn aes_ctr_apply(
+    key: &[u8],
+    iv: &[u8],
+    counter_length: u32,
+    data: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if !matches!(counter_length, 32 | 64 | 128) {
+        return Err(CryptoError::InvalidKey(None));
+    }
+    let cipher = aes_ecb_cipher(key.len())?;
+    let mut counter = <[u8; 16]>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
+
+    let mut out = data.to_vec();
+    // Bounded so the keystream buffer stays small whatever the message size.
+    const BLOCKS_PER_PASS: usize = 512;
+    for segment in out.chunks_mut(16 * BLOCKS_PER_PASS) {
+        let blocks = segment.len().div_ceil(16);
+        let mut counters = Vec::with_capacity(blocks * 16);
+        for _ in 0..blocks {
+            counters.extend_from_slice(&counter);
+            ctr_increment(&mut counter, counter_length);
+        }
+        let keystream = openssl_crypt(cipher, Mode::Encrypt, key, None, &counters, false)
+            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        for (byte, k) in segment.iter_mut().zip(keystream.iter()) {
+            *byte ^= k;
+        }
+    }
+    Ok(out)
+}
+
+fn digest_message_digest_checked(algorithm: HashAlgorithm) -> Result<MessageDigest, CryptoError> {
+    match algorithm {
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+        other => Ok(digest_message_digest(other)),
+    }
+}
+
+fn digest_message_digest(algorithm: HashAlgorithm) -> MessageDigest {
+    match algorithm {
+        HashAlgorithm::Md5 => MessageDigest::md5(),
+        HashAlgorithm::Sha1 => MessageDigest::sha1(),
+        HashAlgorithm::Sha256 => MessageDigest::sha256(),
+        HashAlgorithm::Sha384 => MessageDigest::sha384(),
+        HashAlgorithm::Sha512 => MessageDigest::sha512(),
+    }
+}
+
+// HMAC-MD5 has no WebCrypto or Node surface here; the previous provider
+// panicked on it and the enum arm has to stay total.
+fn hmac_md(algorithm: HashAlgorithm) -> &'static MdRef {
+    match algorithm {
+        HashAlgorithm::Md5 => Md::md5(),
+        HashAlgorithm::Sha1 => Md::sha1(),
+        HashAlgorithm::Sha256 => Md::sha256(),
+        HashAlgorithm::Sha384 => Md::sha384(),
+        HashAlgorithm::Sha512 => Md::sha512(),
+    }
+}
 
 fn rsa_md(hash_alg: HashAlgorithm) -> Result<&'static MdRef, CryptoError> {
     match hash_alg {
@@ -107,74 +259,46 @@ fn rsa_configure_oaep<T>(
     Ok(())
 }
 
-impl From<aes::cipher::InvalidLength> for CryptoError {
-    fn from(_: aes::cipher::InvalidLength) -> Self {
-        CryptoError::InvalidLength
-    }
-}
 
-impl From<StreamCipherError> for CryptoError {
-    fn from(_: StreamCipherError) -> Self {
-        CryptoError::OperationFailed(None)
-    }
-}
-
-// Digest implementation using sha2/md5 crates
-pub enum RustDigest {
-    Md5(md5::Md5),
-    Sha1(Sha1),
-    Sha256(Sha256),
-    Sha384(Sha384),
-    Sha512(Sha512),
-}
+// Digest and HMAC both run on OpenSSL's EVP layer. `EVP_DigestUpdate` and
+// `EVP_DigestSignUpdate` cannot fail once their context is initialised, and the
+// algorithm set here is closed, so the only reachable failure is allocation.
+// Returning a short or empty digest instead would be a silently wrong answer.
+pub struct RustDigest(Hasher);
 
 impl SimpleDigest for RustDigest {
     fn update(&mut self, data: &[u8]) {
-        match self {
-            RustDigest::Md5(h) => Digest::update(h, data),
-            RustDigest::Sha1(h) => Digest::update(h, data),
-            RustDigest::Sha256(h) => Digest::update(h, data),
-            RustDigest::Sha384(h) => Digest::update(h, data),
-            RustDigest::Sha512(h) => Digest::update(h, data),
-        }
+        self.0.update(data).expect("EVP_DigestUpdate on an initialised context");
     }
 
-    fn finalize(self) -> Vec<u8> {
-        match self {
-            RustDigest::Md5(h) => h.finalize().to_vec(),
-            RustDigest::Sha1(h) => h.finalize().to_vec(),
-            RustDigest::Sha256(h) => h.finalize().to_vec(),
-            RustDigest::Sha384(h) => h.finalize().to_vec(),
-            RustDigest::Sha512(h) => h.finalize().to_vec(),
-        }
+    fn finalize(mut self) -> Vec<u8> {
+        self.0
+            .finish()
+            .expect("EVP_DigestFinal on an initialised context")
+            .to_vec()
     }
 }
 
-// HMAC implementation using hmac crate
-pub enum RustHmac {
-    Sha1(HmacImpl<Sha1>),
-    Sha256(HmacImpl<Sha256>),
-    Sha384(HmacImpl<Sha384>),
-    Sha512(HmacImpl<Sha512>),
+pub struct RustHmac {
+    ctx: MdCtx,
+    // EVP_DigestSignInit keeps the key in the context, so it has to outlive it.
+    // Field order is drop order: `ctx` goes first.
+    _key: PKey<Private>,
 }
 
 impl HmacProvider for RustHmac {
     fn update(&mut self, data: &[u8]) {
-        match self {
-            RustHmac::Sha1(h) => Mac::update(h, data),
-            RustHmac::Sha256(h) => Mac::update(h, data),
-            RustHmac::Sha384(h) => Mac::update(h, data),
-            RustHmac::Sha512(h) => Mac::update(h, data),
-        }
+        self.ctx
+            .digest_sign_update(data)
+            .expect("EVP_DigestSignUpdate on an initialised context");
     }
 
-    fn finalize(self) -> Vec<u8> {
-        match self {
-            RustHmac::Sha1(h) => h.finalize().into_bytes().to_vec(),
-            RustHmac::Sha256(h) => h.finalize().into_bytes().to_vec(),
-            RustHmac::Sha384(h) => h.finalize().into_bytes().to_vec(),
-            RustHmac::Sha512(h) => h.finalize().into_bytes().to_vec(),
-        }
+    fn finalize(mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.ctx
+            .digest_sign_final_to_vec(&mut out)
+            .expect("EVP_DigestSignFinal on an initialised context");
+        out
     }
 }
 
@@ -187,29 +311,16 @@ impl CryptoProvider for RustCryptoProvider {
     type Hmac = RustHmac;
 
     fn digest(&self, algorithm: HashAlgorithm) -> Self::Digest {
-        match algorithm {
-            HashAlgorithm::Md5 => RustDigest::Md5(md5::Md5::new()),
-            HashAlgorithm::Sha1 => RustDigest::Sha1(Sha1::new()),
-            HashAlgorithm::Sha256 => RustDigest::Sha256(Sha256::new()),
-            HashAlgorithm::Sha384 => RustDigest::Sha384(Sha384::new()),
-            HashAlgorithm::Sha512 => RustDigest::Sha512(Sha512::new()),
-        }
+        RustDigest(Hasher::new(digest_message_digest(algorithm)).expect("EVP_MD_CTX allocation"))
     }
 
     fn hmac(&self, algorithm: HashAlgorithm, key: &[u8]) -> Self::Hmac {
-        match algorithm {
-            HashAlgorithm::Md5 => panic!("HMAC-MD5 not supported"),
-            HashAlgorithm::Sha1 => RustHmac::Sha1(HmacImpl::<Sha1>::new_from_slice(key).unwrap()),
-            HashAlgorithm::Sha256 => {
-                RustHmac::Sha256(HmacImpl::<Sha256>::new_from_slice(key).unwrap())
-            },
-            HashAlgorithm::Sha384 => {
-                RustHmac::Sha384(HmacImpl::<Sha384>::new_from_slice(key).unwrap())
-            },
-            HashAlgorithm::Sha512 => {
-                RustHmac::Sha512(HmacImpl::<Sha512>::new_from_slice(key).unwrap())
-            },
-        }
+        let key = PKey::hmac(key).expect("HMAC key of any length is accepted by EVP_PKEY_new_mac_key");
+        let mut ctx = MdCtx::new().expect("EVP_MD_CTX allocation");
+        ctx
+            .digest_sign_init(Some(hmac_md(algorithm)), &key)
+            .expect("EVP_DigestSignInit with a known digest and a MAC key");
+        RustHmac { ctx, _key: key }
     }
 
     fn ecdsa_sign(
@@ -511,98 +622,28 @@ impl CryptoProvider for RustCryptoProvider {
         additional_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
         match mode {
-            AesMode::Cbc => match key.len() {
-                16 => {
-                    let encryptor = Encryptor::<aes::Aes128>::new_from_slices(key, iv)?;
-                    Ok(encryptor.encrypt_padded_vec::<Pkcs7>(data))
-                },
-                24 => {
-                    let encryptor = Encryptor::<aes::Aes192>::new_from_slices(key, iv)?;
-                    Ok(encryptor.encrypt_padded_vec::<Pkcs7>(data))
-                },
-                32 => {
-                    let encryptor = Encryptor::<aes::Aes256>::new_from_slices(key, iv)?;
-                    Ok(encryptor.encrypt_padded_vec::<Pkcs7>(data))
-                },
-                _ => Err(CryptoError::InvalidKey(None)),
+            AesMode::Cbc => {
+                let cipher = aes_cbc_cipher(key.len())?;
+                openssl_crypt(cipher, Mode::Encrypt, key, Some(iv), data, true)
+                    .map_err(|_| CryptoError::EncryptionFailed(None))
             },
-            AesMode::Ctr { counter_length } => {
-                let mut ciphertext = data.to_vec();
-                match (key.len(), counter_length) {
-                    (16, 32) => {
-                        let mut cipher = Ctr32BE::<aes::Aes128>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (16, 64) => {
-                        let mut cipher = Ctr64BE::<aes::Aes128>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (16, 128) => {
-                        let mut cipher = Ctr128BE::<aes::Aes128>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (24, 32) => {
-                        let mut cipher = Ctr32BE::<aes::Aes192>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (24, 64) => {
-                        let mut cipher = Ctr64BE::<aes::Aes192>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (24, 128) => {
-                        let mut cipher = Ctr128BE::<aes::Aes192>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (32, 32) => {
-                        let mut cipher = Ctr32BE::<aes::Aes256>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (32, 64) => {
-                        let mut cipher = Ctr64BE::<aes::Aes256>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    (32, 128) => {
-                        let mut cipher = Ctr128BE::<aes::Aes256>::new_from_slices(key, iv)?;
-                        cipher.try_apply_keystream(&mut ciphertext)?;
-                    },
-                    _ => return Err(CryptoError::InvalidKey(None)),
-                }
-                Ok(ciphertext)
-            },
+            AesMode::Ctr { counter_length } => aes_ctr_apply(key, iv, counter_length, data),
             AesMode::Gcm { tag_length } => {
-                let variant = AesGcmVariant::new((key.len() * 8) as u16, tag_length, key)?;
-                let nonce: &Array<_, _> =
-                    &Nonce::<U12>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
-
-                let plaintext = Payload {
-                    msg: data,
-                    aad: additional_data.unwrap_or_default(),
-                };
-
-                match variant {
-                    AesGcmVariant::Aes128Gcm32(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm32(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm32(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm64(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm64(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm64(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm96(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm96(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm96(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm104(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm104(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm104(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm112(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm112(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm112(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm120(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm120(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm120(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes128Gcm128(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes192Gcm128(v) => v.encrypt(nonce, plaintext),
-                    AesGcmVariant::Aes256Gcm128(v) => v.encrypt(nonce, plaintext),
-                }
-                .map_err(|_| CryptoError::EncryptionFailed(None))
+                let cipher = aes_gcm_cipher(key.len())?;
+                let tag_len = aes_gcm_tag_len(tag_length)?;
+                let mut tag = vec![0u8; tag_len];
+                let mut ciphertext = openssl::symm::encrypt_aead(
+                    cipher,
+                    key,
+                    Some(iv),
+                    additional_data.unwrap_or_default(),
+                    data,
+                    &mut tag,
+                )
+                .map_err(|_| CryptoError::EncryptionFailed(None))?;
+                // WebCrypto returns the tag appended to the ciphertext.
+                ciphertext.extend_from_slice(&tag);
+                Ok(ciphertext)
             },
         }
     }
@@ -616,133 +657,46 @@ impl CryptoProvider for RustCryptoProvider {
         additional_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
         match mode {
-            AesMode::Cbc => match key.len() {
-                16 => {
-                    let decryptor = Decryptor::<aes::Aes128>::new_from_slices(key, iv)?;
-                    decryptor
-                        .decrypt_padded_vec::<Pkcs7>(data)
-                        .map_err(|_| CryptoError::DecryptionFailed(None))
-                },
-                24 => {
-                    let decryptor = Decryptor::<aes::Aes192>::new_from_slices(key, iv)?;
-                    decryptor
-                        .decrypt_padded_vec::<Pkcs7>(data)
-                        .map_err(|_| CryptoError::DecryptionFailed(None))
-                },
-                32 => {
-                    let decryptor = Decryptor::<aes::Aes256>::new_from_slices(key, iv)?;
-                    decryptor
-                        .decrypt_padded_vec::<Pkcs7>(data)
-                        .map_err(|_| CryptoError::DecryptionFailed(None))
-                },
-                _ => Err(CryptoError::InvalidKey(None)),
+            AesMode::Cbc => {
+                let cipher = aes_cbc_cipher(key.len())?;
+                openssl_crypt(cipher, Mode::Decrypt, key, Some(iv), data, true)
+                    .map_err(|_| CryptoError::DecryptionFailed(None))
             },
-            AesMode::Ctr { .. } => {
-                // CTR decryption is the same as encryption
-                self.aes_encrypt(mode, key, iv, data, additional_data)
-            },
+            AesMode::Ctr { counter_length } => aes_ctr_apply(key, iv, counter_length, data),
             AesMode::Gcm { tag_length } => {
-                let variant = AesGcmVariant::new((key.len() * 8) as u16, tag_length, key)?;
-                let nonce: &Array<_, _> =
-                    &Nonce::<U12>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
-
-                let ciphertext = Payload {
-                    msg: data,
-                    aad: additional_data.unwrap_or_default(),
-                };
-
-                match variant {
-                    AesGcmVariant::Aes128Gcm32(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm32(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm32(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm64(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm64(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm64(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm96(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm96(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm96(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm104(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm104(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm104(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm112(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm112(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm112(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm120(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm120(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm120(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes128Gcm128(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes192Gcm128(v) => v.decrypt(nonce, ciphertext),
-                    AesGcmVariant::Aes256Gcm128(v) => v.decrypt(nonce, ciphertext),
+                let cipher = aes_gcm_cipher(key.len())?;
+                let tag_len = aes_gcm_tag_len(tag_length)?;
+                if data.len() < tag_len {
+                    return Err(CryptoError::DecryptionFailed(None));
                 }
+                let (ciphertext, tag) = data.split_at(data.len() - tag_len);
+                openssl::symm::decrypt_aead(
+                    cipher,
+                    key,
+                    Some(iv),
+                    additional_data.unwrap_or_default(),
+                    ciphertext,
+                    tag,
+                )
                 .map_err(|_| CryptoError::DecryptionFailed(None))
             },
         }
     }
 
     fn aes_kw_wrap(&self, kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        match kek.len() {
-            16 => {
-                let kw =
-                    KwAes128::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; key.len() + 8];
-                let result = kw
-                    .wrap_key(key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            24 => {
-                let kw =
-                    KwAes192::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; key.len() + 8];
-                let result = kw
-                    .wrap_key(key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            32 => {
-                let kw =
-                    KwAes256::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; key.len() + 8];
-                let result = kw
-                    .wrap_key(key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            _ => Err(CryptoError::InvalidKey(None)),
-        }
+        let cipher = aes_kw_cipher(kek.len())?;
+        // RFC 3394 prepends the 8-byte integrity value, so the output is one
+        // block longer than the input.
+        aes_kw_crypt(cipher, true, kek, key, key.len() + 8)
     }
 
     fn aes_kw_unwrap(&self, kek: &[u8], wrapped_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        match kek.len() {
-            16 => {
-                let kw =
-                    KwAes128::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; wrapped_key.len()];
-                let result = kw
-                    .unwrap_key(wrapped_key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            24 => {
-                let kw =
-                    KwAes192::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; wrapped_key.len()];
-                let result = kw
-                    .unwrap_key(wrapped_key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            32 => {
-                let kw =
-                    KwAes256::new_from_slice(kek).map_err(|_| CryptoError::InvalidKey(None))?;
-                let mut buf = vec![0u8; wrapped_key.len()];
-                let result = kw
-                    .unwrap_key(wrapped_key, &mut buf)
-                    .map_err(|_| CryptoError::OperationFailed(None))?;
-                Ok(result.to_vec())
-            },
-            _ => Err(CryptoError::InvalidKey(None)),
-        }
+        let cipher = aes_kw_cipher(kek.len())?;
+        let out_len = wrapped_key
+            .len()
+            .checked_sub(8)
+            .ok_or(CryptoError::OperationFailed(None))?;
+        aes_kw_crypt(cipher, false, kek, wrapped_key, out_len)
     }
 
     fn hkdf_derive_key(
@@ -753,28 +707,19 @@ impl CryptoProvider for RustCryptoProvider {
         length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
+        let md = rsa_md(hash_alg)?;
         let mut out = vec![0u8; length];
-
-        match hash_alg {
-            HashAlgorithm::Sha1 => {
-                let prk = Hkdf::<Sha1>::new(Some(salt), key);
-                prk.expand(info, &mut out)
-            },
-            HashAlgorithm::Sha256 => {
-                let prk = Hkdf::<Sha256>::new(Some(salt), key);
-                prk.expand(info, &mut out)
-            },
-            HashAlgorithm::Sha384 => {
-                let prk = Hkdf::<Sha384>::new(Some(salt), key);
-                prk.expand(info, &mut out)
-            },
-            HashAlgorithm::Sha512 => {
-                let prk = Hkdf::<Sha512>::new(Some(salt), key);
-                prk.expand(info, &mut out)
-            },
-            _ => return Err(CryptoError::UnsupportedAlgorithm),
-        }
-        .map_err(|_| CryptoError::DerivationFailed(None))?;
+        openssl::pkey_ctx::PkeyCtx::new_id(openssl::pkey::Id::HKDF)
+            .and_then(|mut ctx| {
+                ctx.derive_init()?;
+                ctx.set_hkdf_md(md)?;
+                ctx.set_hkdf_key(key)?;
+                ctx.set_hkdf_salt(salt)?;
+                ctx.add_hkdf_info(info)?;
+                ctx.derive(Some(&mut out))?;
+                Ok(())
+            })
+            .map_err(|_| CryptoError::DerivationFailed(None))?;
         Ok(out)
     }
 
@@ -786,24 +731,12 @@ impl CryptoProvider for RustCryptoProvider {
         length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let mut out = vec![0; length];
         let iterations = NonZeroU32::new(iterations).ok_or(CryptoError::InvalidData(None))?;
-        match hash_alg {
-            HashAlgorithm::Sha1 => {
-                pbkdf2::<HmacImpl<Sha1>>(password, salt, iterations.get(), &mut out)
-            },
-            HashAlgorithm::Sha256 => {
-                pbkdf2::<HmacImpl<Sha256>>(password, salt, iterations.get(), &mut out)
-            },
-            HashAlgorithm::Sha384 => {
-                pbkdf2::<HmacImpl<Sha384>>(password, salt, iterations.get(), &mut out)
-            },
-            HashAlgorithm::Sha512 => {
-                pbkdf2::<HmacImpl<Sha512>>(password, salt, iterations.get(), &mut out)
-            },
-            _ => return Err(CryptoError::UnsupportedAlgorithm),
-        }
-        .map_err(|_| CryptoError::InvalidLength)?;
+        let digest = digest_message_digest_checked(hash_alg)?;
+        let mut out = vec![0; length];
+        let iter = usize::try_from(iterations.get()).map_err(|_| CryptoError::InvalidData(None))?;
+        openssl::pkcs5::pbkdf2_hmac(password, salt, iter, digest, &mut out)
+            .map_err(|_| CryptoError::InvalidLength)?;
         Ok(out)
     }
 

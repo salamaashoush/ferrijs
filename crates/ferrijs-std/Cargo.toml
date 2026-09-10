@@ -92,11 +92,6 @@ either = "1"
 base64 = { workspace = true }
 # `llrt_crypto` (crypto-rust provider) and the `llrt_json` it needs for JWK
 # import/export. Versions match upstream's manifest at the vendored commit.
-aes = "0.9"
-# `hazmat` is what implements the 32/64-bit GCM tag sizes WebCrypto allows.
-aes-gcm = { version = "0.11", features = ["alloc", "aes", "hazmat"], default-features = false }
-aes-kw = { version = "0.3", features = ["oid"], default-features = false }
-cbc = { version = "0.2", features = ["alloc"] }
 chacha20poly1305 = { version = "0.11", features = ["alloc"], default-features = false }
 const-oid = { version = "0.10", features = ["db"], default-features = false }
 cshake = { version = "0.2", features = ["alloc"], default-features = false }
@@ -104,27 +99,20 @@ cshake = { version = "0.2", features = ["alloc"], default-features = false }
 ctutils = { version = "0.4", default-features = false }
 crc32c = { version = "0.6", default-features = false }
 crc32fast = { version = "1", default-features = false }
-ctr = { version = "0.10", default-features = false }
 der = { version = "0.8", features = ["derive", "alloc"], default-features = false }
 ecdsa = { version = "0.17", default-features = false }
 ed25519-dalek = { version = "3.0.0", features = ["alloc", "pkcs8", "rand_core"], default-features = false }
 elliptic-curve = { version = "0.14", features = ["alloc", "sec1"], default-features = false }
-hkdf = { version = "0.13", default-features = false }
-hmac = { version = "0.13", default-features = false }
 keccak = { version = "0.2", default-features = false }
-md-5 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
 ml-dsa = { version = "0.1", features = ["alloc", "pkcs8", "rand_core"], default-features = false }
 ml-kem = { version = "0.3", features = ["alloc", "pkcs8"], default-features = false }
 openssl = { version = "0.10.81", features = ["vendored"] }
 p256 = { version = "0.14", features = ["alloc", "ecdh", "ecdsa", "pkcs8"], default-features = false }
 p384 = { version = "0.14.0", features = ["alloc", "ecdh", "ecdsa", "pkcs8"], default-features = false }
 p521 = { version = "0.14.0", features = ["ecdh", "ecdsa", "pkcs8"], default-features = false }
-pbkdf2 = { version = "0.13", default-features = false }
 pkcs1 = { version = "0.8.0-rc.4", features = ["alloc"], default-features = false }
 pkcs8 = { version = "0.11", features = ["alloc"], default-features = false }
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
-sha1 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
-sha2 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
 sha3 = { version = "0.12", default-features = false }
 shake = { version = "0.1", default-features = false }
 simd-json = { version = "0.18", features = ["big-int-as-float"], default-features = false }
