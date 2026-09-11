@@ -15,8 +15,6 @@ use openssl::derive::Deriver;
 use openssl::ecdsa::EcdsaSig;
 use openssl::nid::Nid;
 use openssl::hash::{Hasher, MessageDigest};
-use openssl::cipher::{Cipher as OsslCipher, CipherRef};
-use openssl::cipher_ctx::{CipherCtx, CipherCtxFlags};
 use openssl::symm::{Cipher, Crypter, Mode};
 use openssl::md_ctx::MdCtx;
 use openssl::md::{Md, MdRef};
@@ -144,15 +142,6 @@ fn aes_ecb_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
     }
 }
 
-fn aes_kw_cipher(kek_len: usize) -> Result<&'static CipherRef, CryptoError> {
-    match kek_len {
-        16 => Ok(OsslCipher::aes_128_wrap()),
-        24 => Ok(OsslCipher::aes_192_wrap()),
-        32 => Ok(OsslCipher::aes_256_wrap()),
-        _ => Err(CryptoError::InvalidKey(None)),
-    }
-}
-
 // The tag lengths WebCrypto allows for AES-GCM.
 fn aes_gcm_tag_len(tag_length: u8) -> Result<usize, CryptoError> {
     match tag_length {
@@ -178,34 +167,75 @@ fn openssl_crypt(
     Ok(out)
 }
 
-// OpenSSL gates its key-wrap ciphers behind an explicit flag, and passing no
-// IV selects RFC 3394's default integrity value, which is the one WebCrypto's
-// AES-KW specifies.
-fn aes_kw_crypt(
-    cipher: &'static CipherRef,
-    encrypt: bool,
-    kek: &[u8],
-    data: &[u8],
-    out_len: usize,
-) -> Result<Vec<u8>, CryptoError> {
-    let mut ctx = CipherCtx::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    ctx.set_flags(CipherCtxFlags::FLAG_WRAP_ALLOW);
-    if encrypt {
-        ctx.encrypt_init(Some(cipher), Some(kek), None)
-    } else {
-        ctx.decrypt_init(Some(cipher), Some(kek), None)
+// RFC 3394. AWS-LC does not expose AES key wrap through the EVP cipher
+// interface, and `aws_lc_rs::key_wrap` has no 192-bit algorithm, so the
+// algorithm is run here over AES-ECB. `A` is the integrity value, starting at
+// the default IV the RFC fixes and which WebCrypto's AES-KW uses.
+const AES_KW_IV: [u8; 8] = [0xa6; 8];
+
+fn aes_kw_wrap_rfc3394(kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if key.len() < 16 || !key.len().is_multiple_of(8) {
+        return Err(CryptoError::InvalidLength);
     }
-    .map_err(|_| CryptoError::InvalidKey(None))?;
-    ctx.set_padding(false);
-    let mut out = Vec::with_capacity(out_len + cipher.block_size());
-    ctx.cipher_update_vec(data, &mut out)
-        .map_err(|_| CryptoError::OperationFailed(None))?;
-    ctx.cipher_final_vec(&mut out)
-        .map_err(|_| CryptoError::OperationFailed(None))?;
-    if out.len() != out_len {
+    let cipher = aes_ecb_cipher(kek.len())?;
+    let n = key.len() / 8;
+    let mut a = AES_KW_IV;
+    let mut r = key.to_vec();
+
+    let mut block = [0u8; 16];
+    for j in 0..6u64 {
+        for (i, chunk) in (1..=n).zip(r.chunks_mut(8)) {
+            block[..8].copy_from_slice(&a);
+            block[8..].copy_from_slice(chunk);
+            let out = openssl_crypt(cipher, Mode::Encrypt, kek, None, &block, false)
+                .map_err(|_| CryptoError::OperationFailed(None))?;
+            // t = n * j + i, xored into the low bytes of A.
+            let t = j * n as u64 + i as u64;
+            a.copy_from_slice(&out[..8]);
+            for (byte, t_byte) in a.iter_mut().rev().zip(t.to_le_bytes()) {
+                *byte ^= t_byte;
+            }
+            chunk.copy_from_slice(&out[8..]);
+        }
+    }
+
+    let mut wrapped = Vec::with_capacity(key.len() + 8);
+    wrapped.extend_from_slice(&a);
+    wrapped.extend_from_slice(&r);
+    Ok(wrapped)
+}
+
+fn aes_kw_unwrap_rfc3394(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    if wrapped.len() < 24 || !wrapped.len().is_multiple_of(8) {
         return Err(CryptoError::OperationFailed(None));
     }
-    Ok(out)
+    let cipher = aes_ecb_cipher(kek.len())?;
+    let n = wrapped.len() / 8 - 1;
+    let mut a = <[u8; 8]>::try_from(&wrapped[..8]).map_err(|_| CryptoError::OperationFailed(None))?;
+    let mut r = wrapped[8..].to_vec();
+
+    let mut block = [0u8; 16];
+    for j in (0..6u64).rev() {
+        for (i, chunk) in (1..=n).rev().zip(r.chunks_mut(8).rev()) {
+            let t = j * n as u64 + i as u64;
+            block[..8].copy_from_slice(&a);
+            for (byte, t_byte) in block[..8].iter_mut().rev().zip(t.to_le_bytes()) {
+                *byte ^= t_byte;
+            }
+            block[8..].copy_from_slice(chunk);
+            let out = openssl_crypt(cipher, Mode::Decrypt, kek, None, &block, false)
+                .map_err(|_| CryptoError::OperationFailed(None))?;
+            a.copy_from_slice(&out[..8]);
+            chunk.copy_from_slice(&out[8..]);
+        }
+    }
+
+    // The integrity value is the whole point: a wrong KEK or a tampered
+    // wrapping lands here and must not return a key.
+    if !openssl::memcmp::eq(&a, &AES_KW_IV) {
+        return Err(CryptoError::OperationFailed(None));
+    }
+    Ok(r)
 }
 
 // WebCrypto's AES-CTR `length` is the width of the counter field, and the
@@ -682,19 +712,11 @@ impl CryptoProvider for RustCryptoProvider {
     }
 
     fn aes_kw_wrap(&self, kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = aes_kw_cipher(kek.len())?;
-        // RFC 3394 prepends the 8-byte integrity value, so the output is one
-        // block longer than the input.
-        aes_kw_crypt(cipher, true, kek, key, key.len() + 8)
+        aes_kw_wrap_rfc3394(kek, key)
     }
 
     fn aes_kw_unwrap(&self, kek: &[u8], wrapped_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = aes_kw_cipher(kek.len())?;
-        let out_len = wrapped_key
-            .len()
-            .checked_sub(8)
-            .ok_or(CryptoError::OperationFailed(None))?;
-        aes_kw_crypt(cipher, false, kek, wrapped_key, out_len)
+        aes_kw_unwrap_rfc3394(kek, wrapped_key)
     }
 
     fn hkdf_derive_key(

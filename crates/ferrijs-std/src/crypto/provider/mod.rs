@@ -1608,6 +1608,50 @@ mod tests {
             }
         }
 
+        // AES-KW is RFC 3394, and AWS-LC does not expose it through the EVP
+        // cipher interface the way OpenSSL does, so it is built here from
+        // AES-ECB. These pin all three KEK sizes against the EVP
+        // implementation they replaced, including the 192-bit KEK that
+        // `aws_lc_rs::key_wrap` has no algorithm for.
+        const KW_VECTORS: &[(usize, usize, &str)] = &[
+            (16, 16, "83d32f67edb02c33ada244b2161b6a8a6b0b0ab7f057a411"),
+            (16, 24, "101877664ba441d0e9feebf883e4c5724a1b827bc5d495dc5ba6e2aec0cc673a"),
+            (16, 32, "bbee6c3ed3093793573d941678a2aa7a6412700320e22d790d1f4762646c7495d3f30cf74e916731"),
+            (16, 64, "a9c1e97b4804f2f599e4ba08107b6afccb90fb0c3f7e13e653a3a316948b163f09d2c41f2e9ebf3aee43503819312a64cf4189bc9a3be6f360c4cdee7d659f9354a082c460f0cb20"),
+            (24, 16, "197d1cf6b7ae53ec3d1f9b9fa217b7eb634a8b5d018daf17"),
+            (24, 24, "5e5e9a181224c39ec347fad456dca1862efa2170c935bd7c25afb9f365046ea5"),
+            (24, 32, "1d978ef64d02151e4a682046380f8fee4eed81320f5e14064c114f6c0942137866af1facc00df169"),
+            (24, 64, "7591ebf75ba26294ac808d91db068f1664e03dd59167e7644fec44be4641f9c8a465c5c292b6ef0c663e8966a177d16fe8236921d3be96a32e9a8efe3b45856d56500bb240e872ad"),
+            (32, 16, "a5d13a78f1e89a6c7909773b10b074e21afed1fae63804db"),
+            (32, 24, "8e080912dd9c89d97e9d75639a0cbfd3133ff2429666bbcfab0ee7c6351daa6d"),
+            (32, 32, "a606e28b1e0c8db3f797d64ca388b9ccc14b4ed653880b0d3cddc3425e9c53957fc2bdf51e6eaee4"),
+            (32, 64, "b3feb26bf08b1f6aafb107776bd7f3d2bc3bc5ec9459804549fbc651f12f76210edd948d897b0a77c99f26068cda8f4f577efaaf240a565b13a4a45ea89b369f8c0c489576d3e214"),
+        ];
+
+        #[test]
+        fn test_aes_kw_known_answers() {
+            let p = provider();
+            for (kek_len, key_len, want) in KW_VECTORS {
+                let kek: Vec<u8> = (0..*kek_len).map(|i| (i as u8).wrapping_mul(7)).collect();
+                let key: Vec<u8> = (0..*key_len).map(|i| (i as u8).wrapping_add(0xa0)).collect();
+
+                let wrapped = p.aes_kw_wrap(&kek, &key).unwrap();
+                let got: String = wrapped.iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(&got, want, "AES-{}-KW of {} bytes", kek_len * 8, key_len);
+
+                let back = p.aes_kw_unwrap(&kek, &wrapped).unwrap();
+                assert_eq!(back, key, "AES-{}-KW unwrap", kek_len * 8);
+
+                // The integrity check has to reject a tampered wrapping.
+                let mut tampered = wrapped.clone();
+                tampered[0] ^= 0x01;
+                assert!(
+                    p.aes_kw_unwrap(&kek, &tampered).is_err(),
+                    "AES-{}-KW tampered", kek_len * 8
+                );
+            }
+        }
+
         #[test]
         fn test_rsa_pkcs1v15_known_answer() {
             let p = provider();
