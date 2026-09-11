@@ -153,9 +153,10 @@ fn assert_resources(value: &serde_json::Value) {
   assert!(value["uptime"].as_u64().is_some_and(|n| n > 0), "uptime: {value:?}");
   assert_eq!(value["loadavg"].as_array().map(Vec::len), Some(3));
 
-  // The vendored upstream reports every CPU time as a hardcoded 0. These
-  // come from /proc/stat or host_processor_info, so a machine that has run
-  // long enough to reach this assertion has spent time somewhere.
+  // The vendored upstream reports every CPU time as a hardcoded 0. These come
+  // from /proc/stat, host_processor_info or NtQuerySystemInformation, so a
+  // machine that has run long enough to reach this assertion has spent time
+  // somewhere.
   let times = &value["firstCpu"]["times"];
   let busy: u64 = ["user", "nice", "sys", "idle", "irq"]
     .iter()
@@ -171,15 +172,23 @@ fn assert_resources(value: &serde_json::Value) {
 /// Who is running it, and what it is attached to.
 fn assert_user_and_network(value: &serde_json::Value) {
   let user = &value["user"];
-  assert!(user["uid"].as_u64().is_some(), "userInfo uid: {user:?}");
-  assert!(user["gid"].as_u64().is_some(), "userInfo gid: {user:?}");
+  // Node reports uid and gid as -1 on Windows, which has no such ids, and
+  // leaves shell null there.
+  if cfg!(target_os = "windows") {
+    assert_eq!(user["uid"].as_i64(), Some(-1), "userInfo uid: {user:?}");
+    assert_eq!(user["gid"].as_i64(), Some(-1), "userInfo gid: {user:?}");
+    assert!(user["shell"].is_null(), "userInfo shell: {user:?}");
+  } else {
+    assert!(user["uid"].as_u64().is_some(), "userInfo uid: {user:?}");
+    assert!(user["gid"].as_u64().is_some(), "userInfo gid: {user:?}");
+    assert!(
+      user["shell"].as_str().is_some_and(|s| s.starts_with('/')),
+      "userInfo shell: {user:?}"
+    );
+  }
   assert!(
     user["username"].as_str().is_some_and(|u| !u.is_empty()),
     "userInfo username comes from the password database: {user:?}"
-  );
-  assert!(
-    user["shell"].as_str().is_some_and(|s| s.starts_with('/')),
-    "userInfo shell: {user:?}"
   );
   assert!(value["priority"].as_i64().is_some(), "getPriority: {value:?}");
 
