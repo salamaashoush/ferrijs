@@ -1106,7 +1106,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ferrijs"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-bundle"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ferrijs",
  "rolldown",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "clap",
  "ferrijs",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-fetch"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "ferrijs-permissions",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-permissions"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-serde"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "quickcheck",
  "rquickjs",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "ferrijs-std"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
