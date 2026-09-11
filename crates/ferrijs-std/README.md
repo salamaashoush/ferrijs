@@ -504,71 +504,64 @@ the extension that needs it.
     async reads retain `code`, `errno`, `syscall`, and `path` through
     `node::system_error`, including `EISDIR` for reading a directory.
 
-36. **`crypto/provider/rust/mod.rs` — RSA is ours, on OpenSSL, not
-    upstream's `rsa`.** This is the most important entry in this list: a
-    re-sync diffs against upstream and would otherwise drag the
-    RustCrypto `rsa` back in. Upstream's pure-Rust provider implements
-    RSA with the `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin
-    attack: key recovery through a timing side channel in a
-    non-constant-time implementation). RustSec records `patched = []`,
-    so there is no version to move to and no consumer can resolve it by
-    bumping. Every RSA operation — PSS and PKCS#1 v1.5 sign and verify,
-    OAEP encrypt and decrypt, key generation, and the PKCS#1 / PKCS#8 /
-    SPKI / JWK conversions — now goes through the `openssl` crate
-    (vendored OpenSSL 3.x) via `PkeyCtx`, while the rest of the provider
-    stays on RustCrypto. `pkcs1` is a direct dependency now because the
-    `RSAPrivateKey` / `RSAPublicKey` ASN.1 types used to arrive through
-    `rsa`; it is DER structure only and carries no advisory.
+36. **`crypto/provider/rust/mod.rs` — RSA is ours, not upstream's `rsa`
+    crate.** Upstream's pure-Rust provider implements RSA with the `rsa`
+    crate, which carries RUSTSEC-2023-0071 (Marvin attack: key recovery
+    through a timing side channel in a non-constant-time implementation).
+    RustSec records `patched = []`, so there is no version to move to and
+    no consumer can resolve it by bumping. A re-sync diffs against
+    upstream and would take it back, so this entry exists to stop that.
 
-    OpenSSL was chosen over `aws-lc-rs` because its safe API is the only
-    one that keeps the whole surface: arbitrary PSS `saltLength`
-    (`RsaPssSaltlen::custom`), arbitrary `modulusLength` and `e = 3`
-    (`generate_with_e`), SHA-1 signing, and private-key JWK export via
-    the component accessors. `aws-lc-rs` pins the PSS salt to the digest
-    length in a `pub(crate)` function, exposes key generation only as a
-    four-value enum, and offers no component accessors, so adopting it
-    would have silently dropped four documented behaviours.
+    Where RSA went is delta 37, along with the rest of the provider.
 
-    On re-sync: keep OUR RSA methods and the `openssl` dependency. Do
-    not take upstream's `rsa`-based ones back.
+37. **The crypto provider is AWS-LC, not RustCrypto.** This is the most
+    important entry in this list: upstream's provider is a pile of
+    RustCrypto crates, so a re-sync diffs against that and would drag all
+    of them back. `crypto/provider/rust/mod.rs` keeps its upstream name
+    and its `crypto-rust` feature gate, so upstream's `#[cfg]` arms still
+    line up. The implementation underneath is `aws-lc-rs`.
 
-37. **The crypto provider is OpenSSL throughout, not RustCrypto.** Delta
-    36 moved RSA; this moved the rest, and together they are the largest
-    divergence in this list. Upstream's provider is a pile of RustCrypto
-    crates, so a re-sync diffs against that and would drag all of them
-    back. `crypto/provider/rust/mod.rs` keeps its upstream name and its
-    `crypto-rust` feature gate, so upstream's `#[cfg]` arms still line up.
-    The implementation underneath is OpenSSL. That covers digests, HMAC,
-    HKDF, PBKDF2, AES-CBC/CTR/GCM, AES-KW, ECDSA, ECDH, EC key generation
-    and the SEC1 / SPKI / PKCS#8 / JWK conversions, Ed25519 and X25519,
-    and in `provider/modern.rs` ChaCha20-Poly1305, SHA-3, SHAKE-256 and
-    the traditional half of the hybrid KEMs. `provider/rust/aes_variants.rs`
-    is deleted: it existed only to enumerate the 21 AES-GCM key and
-    tag-length pairs OpenSSL takes as parameters.
+    That covers digests, HMAC, HKDF, PBKDF2, all of RSA, ECDSA, ECDH, EC
+    key generation and the SEC1 / SPKI / PKCS#8 / JWK conversions,
+    Ed25519, X25519, AES-CBC, and in `provider/modern.rs`
+    ChaCha20-Poly1305, SHA-3 and the traditional half of the hybrid KEMs.
 
-    Twenty-two dependencies went with it: `md-5`, `sha1`, `sha2`, `sha3`,
-    `shake`, `hmac`, `hkdf`, `pbkdf2`, `aes`, `aes-gcm`, `aes-kw`, `cbc`,
-    `ctr`, `chacha20poly1305`, `ecdsa`, `ed25519-dalek`, `x25519-dalek`,
-    `elliptic-curve`, `p256`, `p384`, `p521` and `ctutils`.
+    A host that speaks TLS already links the same `aws-lc-sys` through
+    rustls, so this puts one C crypto library in the binary rather than a
+    second one beside it. That is the reason it is not the `openssl`
+    crate: an earlier version of this provider vendored OpenSSL, which
+    built a whole second library from source and wanted perl and make
+    that nothing else here needs. `openssl-sys` can be backed by
+    `aws-lc-sys` and would have kept more surface, but it pins that
+    dependency to 0.41 where rustls is on 0.45, and the differing link
+    names mean the binary would hold two copies of AWS-LC.
 
-    What is still RustCrypto is what OpenSSL has no answer for, and it
-    should stay: `cshake`, `keccak` and `sponge-cursor` behind CSHAKE and
-    TurboSHAKE, and `ml-kem` and `ml-dsa`, whose key types the `openssl`
-    crate names but whose encapsulate and decapsulate it does not bind.
-    `rand` stays too; it is a facade over the OS generator rather than an
-    algorithm, and its uniform range sampling is easy to reintroduce with
-    modulo bias.
+    What stays on pure-Rust crates is what AWS-LC's safe API cannot
+    reach. They add no C build and cross-compile wherever this runtime
+    does. `md-5` is there because AWS-LC has no MD5, and `cshake`,
+    `keccak` and `sponge-cursor` sit behind CSHAKE and TurboSHAKE.
+    `shake` is there because AWS-LC implements SHA-3 but exposes no XOF,
+    and the hybrid KEM seed expansion needs SHAKE-256. `ml-kem` and
+    `ml-dsa` keep their private keys as seeds, where AWS-LC takes only
+    expanded ones. And `aes-gcm` carries the seven WebCrypto tag lengths
+    AWS-LC cannot express, its AEAD being fixed at sixteen bytes.
 
-    Three things do not survive a careless re-sync, and each has a test
+    Three capabilities are refused rather than answered wrongly, and each
+    has a test pinning the refusal. RSA-PSS takes only a `saltLength`
+    equal to the digest length. RSA generates only at AWS-LC's four sizes
+    and only with `e = 65537`. ECDSA signs only under the hash its curve
+    is paired with, which is ES256, ES384 and ES512.
+
+    Four things do not survive a careless re-sync, and each has a test
     that fails if it is lost. WebCrypto's AES-CTR `length` is the width
-    of the counter field and wraps inside it, while `EVP_aes_*_ctr`
-    always increments the full 128-bit block, so the keystream is built
-    from AES-ECB instead. EC coordinates are left-padded to the field
-    width, which is 66 bytes on P-521, and an ECDSA signature is the
-    fixed-width r and s rather than OpenSSL's DER. And a hybrid KEM
-    private key is a seed expanded with SHAKE-256, whose traditional
-    scalar is the first chunk satisfying 0 < d < n, so the group order is
-    compared explicitly rather than inferred from a parse failure.
+    of the counter field and wraps inside it, while AWS-LC's CTR always
+    increments the full 128-bit block, so the keystream is built from
+    AES-ECB. AES-KW is RFC 3394 over the same ECB primitive, because
+    `aws_lc_rs::key_wrap` carries no 192-bit algorithm. EC coordinates
+    are left-padded to the field width, 66 bytes on P-521, and an ECDSA
+    signature is the fixed-width r and s. And a hybrid KEM private key is
+    a seed expanded with SHAKE-256 whose traditional scalar is the first
+    chunk AWS-LC accepts as a valid one.
 
     On re-sync: keep OUR provider. Do not take upstream's RustCrypto one
     back.
