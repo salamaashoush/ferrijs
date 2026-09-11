@@ -531,3 +531,44 @@ the extension that needs it.
 
     On re-sync: keep OUR RSA methods and the `openssl` dependency. Do
     not take upstream's `rsa`-based ones back.
+
+37. **The crypto provider is OpenSSL throughout, not RustCrypto.** Delta
+    36 moved RSA; this moved the rest, and together they are the largest
+    divergence in this list. Upstream's provider is a pile of RustCrypto
+    crates, so a re-sync diffs against that and would drag all of them
+    back. `crypto/provider/rust/mod.rs` keeps its upstream name and its
+    `crypto-rust` feature gate, so upstream's `#[cfg]` arms still line up.
+    The implementation underneath is OpenSSL. That covers digests, HMAC,
+    HKDF, PBKDF2, AES-CBC/CTR/GCM, AES-KW, ECDSA, ECDH, EC key generation
+    and the SEC1 / SPKI / PKCS#8 / JWK conversions, Ed25519 and X25519,
+    and in `provider/modern.rs` ChaCha20-Poly1305, SHA-3, SHAKE-256 and
+    the traditional half of the hybrid KEMs. `provider/rust/aes_variants.rs`
+    is deleted: it existed only to enumerate the 21 AES-GCM key and
+    tag-length pairs OpenSSL takes as parameters.
+
+    Twenty-two dependencies went with it: `md-5`, `sha1`, `sha2`, `sha3`,
+    `shake`, `hmac`, `hkdf`, `pbkdf2`, `aes`, `aes-gcm`, `aes-kw`, `cbc`,
+    `ctr`, `chacha20poly1305`, `ecdsa`, `ed25519-dalek`, `x25519-dalek`,
+    `elliptic-curve`, `p256`, `p384`, `p521` and `ctutils`.
+
+    What is still RustCrypto is what OpenSSL has no answer for, and it
+    should stay: `cshake`, `keccak` and `sponge-cursor` behind CSHAKE and
+    TurboSHAKE, and `ml-kem` and `ml-dsa`, whose key types the `openssl`
+    crate names but whose encapsulate and decapsulate it does not bind.
+    `rand` stays too; it is a facade over the OS generator rather than an
+    algorithm, and its uniform range sampling is easy to reintroduce with
+    modulo bias.
+
+    Three things do not survive a careless re-sync, and each has a test
+    that fails if it is lost. WebCrypto's AES-CTR `length` is the width
+    of the counter field and wraps inside it, while `EVP_aes_*_ctr`
+    always increments the full 128-bit block, so the keystream is built
+    from AES-ECB instead. EC coordinates are left-padded to the field
+    width, which is 66 bytes on P-521, and an ECDSA signature is the
+    fixed-width r and s rather than OpenSSL's DER. And a hybrid KEM
+    private key is a seed expanded with SHAKE-256, whose traditional
+    scalar is the first chunk satisfying 0 < d < n, so the group order is
+    compared explicitly rather than inferred from a parse failure.
+
+    On re-sync: keep OUR provider. Do not take upstream's RustCrypto one
+    back.
