@@ -98,14 +98,21 @@ crc32c = { version = "0.6", default-features = false }
 crc32fast = { version = "1", default-features = false }
 der = { version = "0.8", features = ["derive", "alloc"], default-features = false }
 keccak = { version = "0.2", default-features = false }
+aes-gcm = { version = "0.11", features = ["alloc", "aes", "hazmat"], default-features = false }
+hmac = { version = "0.13", default-features = false }
+md-5 = { version = "0.11", features = ["alloc", "oid"], default-features = false }
 ml-dsa = { version = "0.1", features = ["alloc", "pkcs8", "rand_core"], default-features = false }
 ml-kem = { version = "0.3", features = ["alloc", "pkcs8"], default-features = false }
-openssl = { version = "0.10.81", features = ["vendored"] }
+# The one C crypto library in the tree. A host that also speaks TLS links the
+# same aws-lc-sys through rustls, so there is a single copy of AWS-LC in the
+# binary rather than a second, vendored OpenSSL beside it.
+aws-lc-rs = { version = "1.18" }
 pkcs1 = { version = "0.8.0-rc.4", features = ["alloc"], default-features = false }
 pkcs8 = { version = "0.11", features = ["alloc"], default-features = false }
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
 simd-json = { version = "0.18", features = ["big-int-as-float"], default-features = false }
 spki = { version = "0.8", features = ["alloc"], default-features = false }
+shake = { version = "0.1", default-features = false }
 sponge-cursor = { version = "0.1", default-features = false }
 
 base64-simd = { version = "0.8", features = ["alloc"], default-features = false }

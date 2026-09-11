@@ -1,27 +1,44 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod aes_variants;
+
 use std::num::NonZeroU32;
 
 use der::{
     asn1::{BitStringRef, OctetString, OctetStringRef},
     Decode, Encode,
 };
-use std::ffi::c_int;
 
-use openssl::bn::{BigNum, BigNumContext, BigNumRef};
-use openssl::ec::{EcGroup, EcKey, EcKeyRef, EcPoint, PointConversionForm};
-use openssl::derive::Deriver;
-use openssl::ecdsa::EcdsaSig;
-use openssl::nid::Nid;
-use openssl::hash::{Hasher, MessageDigest};
-use openssl::symm::{Cipher, Crypter, Mode};
-use openssl::md_ctx::MdCtx;
-use openssl::md::{Md, MdRef};
-use openssl::pkey::{HasPublic, Id, PKey, Private, Public};
-use openssl::pkey_ctx::PkeyCtx;
-use openssl::rsa::{Padding, Rsa};
-use openssl::sign::{RsaPssSaltlen, Signer, Verifier};
+use aws_lc_rs::agreement::PrivateKey as LcAgreementPrivateKey;
+use aws_lc_rs::cipher::{self as lc_cipher};
+use aws_lc_rs::constant_time as lc_constant_time;
+use aws_lc_rs::iv::FixedLength;
+use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der};
+use aws_lc_rs::encoding::{AsBigEndian, Curve25519SeedBin, EcPrivateKeyBin};
+use aws_lc_rs::signature::{
+    EcdsaKeyPair as LcEcdsaKeyPair, Ed25519KeyPair as LcEd25519KeyPair, KeyPair as _,
+};
+use aws_lc_rs::rsa::{
+    KeyPair as LcRsaKeyPair, KeySize as LcRsaKeySize, OaepAlgorithm as LcOaepAlgorithm,
+    OaepPrivateDecryptingKey as LcRsaOaepPrivateDecryptingKey,
+    OaepPublicEncryptingKey as LcRsaOaepPublicEncryptingKey,
+    PrivateDecryptingKey as LcRsaPrivateDecryptingKey,
+    PublicEncryptingKey as LcRsaPublicEncryptingKey,
+};
+use aws_lc_rs::{
+    agreement as lc_agreement, digest as lc_digest, hkdf as lc_hkdf, hmac as lc_hmac, pbkdf2 as lc_pbkdf2, rsa as lc_rsa,
+    signature as lc_signature,
+};
+use hmac::{digest::KeyInit as _, Hmac as HmacImpl, Mac};
+use aes_variants::AesGcmVariant;
+use md5::Digest as Md5Digest;
+
+// AWS-LC has no MD5. It is the one hash this runtime exposes that has to come
+// from somewhere else, so it is named once here rather than spelled out at
+// each use.
+type HmacMd5 = HmacImpl<md5::Md5>;
+
 
 use crate::crypto::{
     hash::HashAlgorithm,
@@ -35,22 +52,42 @@ use crate::crypto::{
 // X25519 public points are derived through OpenSSL from the raw scalar, which
 // is how this provider stores an X25519 private key.
 fn x25519_public_from_raw(secret: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    PKey::private_key_from_raw_bytes(secret, Id::X25519)
-        .and_then(|k| k.raw_public_key())
+    let key = LcAgreementPrivateKey::from_private_key(&lc_agreement::X25519, secret)
+        .map_err(|_| CryptoError::InvalidKey(None))?;
+    key.compute_public_key()
+        .map(|public| public.as_ref().to_vec())
         .map_err(|_| CryptoError::InvalidKey(None))
 }
 
-fn ec_group(curve: EllipticCurve) -> Result<EcGroup, CryptoError> {
-    let nid = match curve {
-        EllipticCurve::P256 => Nid::X9_62_PRIME256V1,
-        EllipticCurve::P384 => Nid::SECP384R1,
-        EllipticCurve::P521 => Nid::SECP521R1,
-    };
-    EcGroup::from_curve_name(nid).map_err(|_| CryptoError::UnsupportedAlgorithm)
+fn ec_curve_oid(curve: EllipticCurve) -> der::asn1::ObjectIdentifier {
+    match curve {
+        EllipticCurve::P256 => const_oid::db::rfc5912::SECP_256_R_1,
+        EllipticCurve::P384 => const_oid::db::rfc5912::SECP_384_R_1,
+        EllipticCurve::P521 => const_oid::db::rfc5912::SECP_521_R_1,
+    }
 }
 
+fn ec_pkcs8_from_scalar(curve: EllipticCurve, scalar: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let key = LcAgreementPrivateKey::from_private_key(ecdh_algorithm(curve), scalar)
+        .map_err(|_| CryptoError::InvalidKey(None))?;
+    AsDer::<Pkcs8V1Der<'_>>::as_der(&key)
+        .map(|der| der.as_ref().to_vec())
+        .map_err(|_| CryptoError::OperationFailed(None))
+}
+
+fn ecdh_algorithm(curve: EllipticCurve) -> &'static lc_agreement::Algorithm {
+    match curve {
+        EllipticCurve::P256 => &lc_agreement::ECDH_P256,
+        EllipticCurve::P384 => &lc_agreement::ECDH_P384,
+        EllipticCurve::P521 => &lc_agreement::ECDH_P521,
+    }
+}
+
+// AWS-LC has no MD5, so that one digest stays on a pure-Rust implementation.
+// Both enums carry it as a separate arm rather than pushing the whole surface
+// onto the slower path.
 // The byte width of a coordinate on this curve. P-521's field is 521 bits, so
-// its coordinates are 66 bytes and have to be left-padded rather than trimmed.
+// its coordinates are 66 bytes and are left-padded rather than trimmed.
 fn ec_field_len(curve: EllipticCurve) -> usize {
     match curve {
         EllipticCurve::P256 => 32,
@@ -59,87 +96,315 @@ fn ec_field_len(curve: EllipticCurve) -> usize {
     }
 }
 
-fn ec_pad(value: &BigNumRef, len: usize) -> Vec<u8> {
-    let raw = value.to_vec();
-    let mut out = vec![0u8; len.saturating_sub(raw.len())];
-    out.extend_from_slice(&raw);
-    out
+// One place maps this runtime's hash names onto AWS-LC's, so a hash AWS-LC does
+// not implement is rejected here rather than somewhere downstream. MD5 is the
+// only one, and it has no home in any of these: AWS-LC omits it, and WebCrypto
+// does not name it for HKDF, PBKDF2 or a signature.
+fn lc_digest_algorithm(algorithm: HashAlgorithm) -> &'static lc_digest::Algorithm {
+    match algorithm {
+        HashAlgorithm::Sha1 => &lc_digest::SHA1_FOR_LEGACY_USE_ONLY,
+        HashAlgorithm::Sha256 => &lc_digest::SHA256,
+        HashAlgorithm::Sha384 => &lc_digest::SHA384,
+        HashAlgorithm::Sha512 => &lc_digest::SHA512,
+        // The caller handles MD5 before it reaches here.
+        HashAlgorithm::Md5 => &lc_digest::SHA256,
+    }
 }
 
-fn ec_private_key(
-    curve: EllipticCurve,
+fn lc_hmac_algorithm(algorithm: HashAlgorithm) -> lc_hmac::Algorithm {
+    match algorithm {
+        HashAlgorithm::Sha1 => lc_hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+        HashAlgorithm::Sha256 => lc_hmac::HMAC_SHA256,
+        HashAlgorithm::Sha384 => lc_hmac::HMAC_SHA384,
+        HashAlgorithm::Sha512 => lc_hmac::HMAC_SHA512,
+        HashAlgorithm::Md5 => lc_hmac::HMAC_SHA256,
+    }
+}
+
+fn lc_hkdf_algorithm(algorithm: HashAlgorithm) -> Result<lc_hkdf::Algorithm, CryptoError> {
+    match algorithm {
+        HashAlgorithm::Sha1 => Ok(lc_hkdf::HKDF_SHA1_FOR_LEGACY_USE_ONLY),
+        HashAlgorithm::Sha256 => Ok(lc_hkdf::HKDF_SHA256),
+        HashAlgorithm::Sha384 => Ok(lc_hkdf::HKDF_SHA384),
+        HashAlgorithm::Sha512 => Ok(lc_hkdf::HKDF_SHA512),
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn lc_pbkdf2_algorithm(algorithm: HashAlgorithm) -> Result<lc_pbkdf2::Algorithm, CryptoError> {
+    match algorithm {
+        HashAlgorithm::Sha1 => Ok(lc_pbkdf2::PBKDF2_HMAC_SHA1),
+        HashAlgorithm::Sha256 => Ok(lc_pbkdf2::PBKDF2_HMAC_SHA256),
+        HashAlgorithm::Sha384 => Ok(lc_pbkdf2::PBKDF2_HMAC_SHA384),
+        HashAlgorithm::Sha512 => Ok(lc_pbkdf2::PBKDF2_HMAC_SHA512),
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+// `expand` wants a type carrying the output length; WebCrypto's is a runtime
+// value rather than a constant.
+#[derive(Clone, Copy)]
+struct HkdfLen(usize);
+
+impl lc_hkdf::KeyType for HkdfLen {
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+// AWS-LC signs only under SHA-256, SHA-384 and SHA-512; it has no
+// `RsaSignatureEncoding` for SHA-1, though it will still verify one.
+fn rsa_pss_encoding(
+    hash_alg: HashAlgorithm,
+) -> Result<(&'static lc_signature::RsaSignatureEncoding, &'static lc_digest::Algorithm), CryptoError>
+{
+    match hash_alg {
+        HashAlgorithm::Sha256 => Ok((&lc_signature::RSA_PSS_SHA256, &lc_digest::SHA256)),
+        HashAlgorithm::Sha384 => Ok((&lc_signature::RSA_PSS_SHA384, &lc_digest::SHA384)),
+        HashAlgorithm::Sha512 => Ok((&lc_signature::RSA_PSS_SHA512, &lc_digest::SHA512)),
+        HashAlgorithm::Sha1 | HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn rsa_pkcs1_encoding(
+    hash_alg: HashAlgorithm,
+) -> Result<(&'static lc_signature::RsaSignatureEncoding, &'static lc_digest::Algorithm), CryptoError>
+{
+    match hash_alg {
+        HashAlgorithm::Sha256 => Ok((&lc_signature::RSA_PKCS1_SHA256, &lc_digest::SHA256)),
+        HashAlgorithm::Sha384 => Ok((&lc_signature::RSA_PKCS1_SHA384, &lc_digest::SHA384)),
+        HashAlgorithm::Sha512 => Ok((&lc_signature::RSA_PKCS1_SHA512, &lc_digest::SHA512)),
+        HashAlgorithm::Sha1 | HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn rsa_pss_params(
+    hash_alg: HashAlgorithm,
+) -> Result<(&'static lc_signature::RsaParameters, &'static lc_digest::Algorithm), CryptoError> {
+    match hash_alg {
+        HashAlgorithm::Sha256 => Ok((&lc_signature::RSA_PSS_2048_8192_SHA256, &lc_digest::SHA256)),
+        HashAlgorithm::Sha384 => Ok((&lc_signature::RSA_PSS_2048_8192_SHA384, &lc_digest::SHA384)),
+        HashAlgorithm::Sha512 => Ok((&lc_signature::RSA_PSS_2048_8192_SHA512, &lc_digest::SHA512)),
+        HashAlgorithm::Sha1 | HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn rsa_pkcs1_params(
+    hash_alg: HashAlgorithm,
+) -> Result<(&'static lc_signature::RsaParameters, &'static lc_digest::Algorithm), CryptoError> {
+    match hash_alg {
+        HashAlgorithm::Sha1 => Ok((
+            &lc_signature::RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+            &lc_digest::SHA1_FOR_LEGACY_USE_ONLY,
+        )),
+        HashAlgorithm::Sha256 => Ok((&lc_signature::RSA_PKCS1_2048_8192_SHA256, &lc_digest::SHA256)),
+        HashAlgorithm::Sha384 => Ok((&lc_signature::RSA_PKCS1_2048_8192_SHA384, &lc_digest::SHA384)),
+        HashAlgorithm::Sha512 => Ok((&lc_signature::RSA_PKCS1_2048_8192_SHA512, &lc_digest::SHA512)),
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+fn rsa_oaep_algorithm(hash_alg: HashAlgorithm) -> Result<&'static LcOaepAlgorithm, CryptoError> {
+    match hash_alg {
+        HashAlgorithm::Sha1 => Ok(&lc_rsa::OAEP_SHA1_MGF1SHA1),
+        HashAlgorithm::Sha256 => Ok(&lc_rsa::OAEP_SHA256_MGF1SHA256),
+        HashAlgorithm::Sha384 => Ok(&lc_rsa::OAEP_SHA384_MGF1SHA384),
+        HashAlgorithm::Sha512 => Ok(&lc_rsa::OAEP_SHA512_MGF1SHA512),
+        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+// An absent label and an empty one are the same input to OAEP.
+fn oaep_label(label: Option<&[u8]>) -> Option<&[u8]> {
+    label.filter(|l| !l.is_empty())
+}
+
+fn rsa_sign_prehashed(
     private_key_der: &[u8],
-) -> Result<EcKey<Private>, CryptoError> {
-    let pkey =
-        PKey::private_key_from_pkcs8(private_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
-    let key = pkey.ec_key().map_err(|_| CryptoError::InvalidKey(None))?;
-    if key.group().curve_name() != ec_group(curve)?.curve_name() {
-        return Err(CryptoError::InvalidKey(None));
-    }
-    Ok(key)
+    digest: &[u8],
+    encoding: &'static lc_signature::RsaSignatureEncoding,
+    algorithm: &'static lc_digest::Algorithm,
+) -> Result<Vec<u8>, CryptoError> {
+    let key = LcRsaKeyPair::from_der(private_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
+    let prehashed = lc_digest::Digest::import_less_safe(digest, algorithm)
+        .map_err(|_| CryptoError::SigningFailed(None))?;
+    let mut signature = vec![0u8; key.public_modulus_len()];
+    key.sign_digest(encoding, &prehashed, &mut signature)
+        .map_err(|_| CryptoError::SigningFailed(None))?;
+    Ok(signature)
 }
 
-fn ec_public_key(
-    curve: EllipticCurve,
-    public_key_sec1: &[u8],
-) -> Result<EcKey<Public>, CryptoError> {
-    let group = ec_group(curve)?;
-    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    let point = EcPoint::from_bytes(&group, public_key_sec1, &mut ctx)
+fn rsa_verify_prehashed(
+    public_key_der: &[u8],
+    signature: &[u8],
+    digest: &[u8],
+    params: &'static lc_signature::RsaParameters,
+    algorithm: &'static lc_digest::Algorithm,
+) -> Result<bool, CryptoError> {
+    let Ok(prehashed) = lc_digest::Digest::import_less_safe(digest, algorithm) else {
+        return Ok(false);
+    };
+    // Parsing up front rejects a malformed key as invalid rather than letting
+    // it read as a failed verification. AWS-LC takes either RFC 8017 or RFC
+    // 5280 here, and this provider stores the RFC 8017 form.
+    let key = lc_signature::ParsedPublicKey::new(params, public_key_der)
         .map_err(|_| CryptoError::InvalidKey(None))?;
-    EcKey::from_public_key(&group, &point).map_err(|_| CryptoError::InvalidKey(None))
+    Ok(key.verify_digest_sig(&prehashed, signature).is_ok())
 }
 
-fn ec_point_bytes(key: &EcKeyRef<impl HasPublic>) -> Result<Vec<u8>, CryptoError> {
-    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    key.public_key()
-        .to_bytes(key.group(), PointConversionForm::UNCOMPRESSED, &mut ctx)
-        .map_err(|_| CryptoError::OperationFailed(None))
+// This provider stores RSA keys in the RFC 8017 shapes, while parts of AWS-LC
+// want the RFC 5280 and PKCS#8 wrappers around them.
+fn rsa_spki_from_pkcs1(public_key_der: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let spki = spki::SubjectPublicKeyInfo {
+        algorithm: spki::AlgorithmIdentifier::<der::asn1::Any> {
+            oid: const_oid::db::rfc5912::RSA_ENCRYPTION,
+            parameters: Some(der::asn1::Null.into()),
+        },
+        subject_public_key: spki::der::asn1::BitString::from_bytes(public_key_der)
+            .map_err(|_| CryptoError::InvalidKey(None))?,
+    };
+    spki.to_der().map_err(|_| CryptoError::InvalidKey(None))
 }
 
-// WebCrypto carries an ECDSA signature as the fixed-width r and s, while
-// OpenSSL speaks the DER SEQUENCE, so both directions convert here.
-fn ecdsa_sig_to_raw(sig: &EcdsaSig, field_len: usize) -> Vec<u8> {
-    let mut out = ec_pad(sig.r(), field_len);
-    out.extend_from_slice(&ec_pad(sig.s(), field_len));
-    out
+// AWS-LC parses PKCS#1 and emits PKCS#8, so it does the wrapping rather than
+// this reassembling the algorithm identifier by hand. Parsing also rejects a
+// malformed key here instead of further in.
+fn rsa_pkcs8_from_pkcs1(private_key_der: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let key = LcRsaKeyPair::from_der(private_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
+    AsDer::<Pkcs8V1Der<'_>>::as_der(&key)
+        .map(|der| der.as_ref().to_vec())
+        .map_err(|_| CryptoError::InvalidKey(None))
 }
 
-fn ecdsa_sig_from_raw(signature: &[u8], field_len: usize) -> Result<EcdsaSig, CryptoError> {
-    if signature.len() != field_len * 2 {
-        return Err(CryptoError::InvalidSignature(None));
+fn rsa_pkcs1_from_pkcs8(pkcs8_der: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let info =
+        pkcs8::PrivateKeyInfoRef::from_der(pkcs8_der).map_err(|_| CryptoError::InvalidKey(None))?;
+    Ok(info.private_key.as_bytes().to_vec())
+}
+
+// AWS-LC pairs each curve with the hashes it will sign under, and `sign_digest`
+// refuses a digest from any other. WebCrypto allows any pairing, so the ones
+// AWS-LC does not carry are refused here rather than signed under the wrong
+// hash. What remains is ES256, ES384 and ES512, which is every pairing JOSE and
+// TLS use.
+fn ecdsa_signing_algorithm(
+    curve: EllipticCurve,
+    digest_len: usize,
+) -> Result<(&'static lc_signature::EcdsaSigningAlgorithm, &'static lc_digest::Algorithm), CryptoError>
+{
+    match (curve, digest_len) {
+        (EllipticCurve::P256, 32) => Ok((
+            &lc_signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &lc_digest::SHA256,
+        )),
+        (EllipticCurve::P384, 48) => Ok((
+            &lc_signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+            &lc_digest::SHA384,
+        )),
+        (EllipticCurve::P521, 32) => Ok((
+            &lc_signature::ECDSA_P521_SHA256_FIXED_SIGNING,
+            &lc_digest::SHA256,
+        )),
+        (EllipticCurve::P521, 48) => Ok((
+            &lc_signature::ECDSA_P521_SHA384_FIXED_SIGNING,
+            &lc_digest::SHA384,
+        )),
+        (EllipticCurve::P521, 64) => Ok((
+            &lc_signature::ECDSA_P521_SHA512_FIXED_SIGNING,
+            &lc_digest::SHA512,
+        )),
+        _ => Err(CryptoError::UnsupportedAlgorithm),
     }
-    let (r, s) = signature.split_at(field_len);
-    let r = BigNum::from_slice(r).map_err(|_| CryptoError::InvalidSignature(None))?;
-    let s = BigNum::from_slice(s).map_err(|_| CryptoError::InvalidSignature(None))?;
-    EcdsaSig::from_private_components(r, s).map_err(|_| CryptoError::InvalidSignature(None))
 }
 
-fn aes_cbc_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
+fn ecdsa_verification_algorithm(
+    curve: EllipticCurve,
+    digest_len: usize,
+) -> Result<
+    (&'static lc_signature::EcdsaVerificationAlgorithm, &'static lc_digest::Algorithm),
+    CryptoError,
+> {
+    match (curve, digest_len) {
+        (EllipticCurve::P256, 32) => {
+            Ok((&lc_signature::ECDSA_P256_SHA256_FIXED, &lc_digest::SHA256))
+        },
+        (EllipticCurve::P384, 48) => {
+            Ok((&lc_signature::ECDSA_P384_SHA384_FIXED, &lc_digest::SHA384))
+        },
+        (EllipticCurve::P521, 32) => {
+            Ok((&lc_signature::ECDSA_P521_SHA256_FIXED, &lc_digest::SHA256))
+        },
+        (EllipticCurve::P521, 48) => {
+            Ok((&lc_signature::ECDSA_P521_SHA384_FIXED, &lc_digest::SHA384))
+        },
+        (EllipticCurve::P521, 64) => {
+            Ok((&lc_signature::ECDSA_P521_SHA512_FIXED, &lc_digest::SHA512))
+        },
+        _ => Err(CryptoError::UnsupportedAlgorithm),
+    }
+}
+
+impl From<aes_gcm::aes::cipher::InvalidLength> for CryptoError {
+    fn from(_: aes_gcm::aes::cipher::InvalidLength) -> Self {
+        CryptoError::InvalidLength
+    }
+}
+
+fn aes_algorithm(key_len: usize) -> Result<&'static lc_cipher::Algorithm, CryptoError> {
     match key_len {
-        16 => Ok(Cipher::aes_128_cbc()),
-        24 => Ok(Cipher::aes_192_cbc()),
-        32 => Ok(Cipher::aes_256_cbc()),
+        16 => Ok(&lc_cipher::AES_128),
+        24 => Ok(&lc_cipher::AES_192),
+        32 => Ok(&lc_cipher::AES_256),
         _ => Err(CryptoError::InvalidKey(None)),
     }
 }
 
-fn aes_gcm_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
-    match key_len {
-        16 => Ok(Cipher::aes_128_gcm()),
-        24 => Ok(Cipher::aes_192_gcm()),
-        32 => Ok(Cipher::aes_256_gcm()),
-        _ => Err(CryptoError::InvalidKey(None)),
+fn aes_key(key: &[u8]) -> Result<lc_cipher::UnboundCipherKey, CryptoError> {
+    lc_cipher::UnboundCipherKey::new(aes_algorithm(key.len())?, key)
+        .map_err(|_| CryptoError::InvalidKey(None))
+}
+
+fn aes_iv_context(iv: &[u8]) -> Result<lc_cipher::EncryptionContext, CryptoError> {
+    let iv = <[u8; 16]>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
+    Ok(lc_cipher::EncryptionContext::Iv128(FixedLength::from(iv)))
+}
+
+fn aes_cbc(key: &[u8], iv: &[u8], data: &[u8], encrypt: bool) -> Result<Vec<u8>, CryptoError> {
+    if encrypt {
+        let cipher = lc_cipher::PaddedBlockEncryptingKey::cbc_pkcs7(aes_key(key)?)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let mut out = data.to_vec();
+        cipher
+            .less_safe_encrypt(&mut out, aes_iv_context(iv)?)
+            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        Ok(out)
+    } else {
+        let cipher = lc_cipher::PaddedBlockDecryptingKey::cbc_pkcs7(aes_key(key)?)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let mut out = data.to_vec();
+        let plaintext = cipher
+            .decrypt(&mut out, aes_iv_context(iv)?.into())
+            .map_err(|_| CryptoError::DecryptionFailed(None))?;
+        Ok(plaintext.to_vec())
     }
 }
 
-fn aes_ecb_cipher(key_len: usize) -> Result<Cipher, CryptoError> {
-    match key_len {
-        16 => Ok(Cipher::aes_128_ecb()),
-        24 => Ok(Cipher::aes_192_ecb()),
-        32 => Ok(Cipher::aes_256_ecb()),
-        _ => Err(CryptoError::InvalidKey(None)),
+// AES-ECB over one buffer. It is the primitive CTR and RFC 3394 are built from
+// rather than a mode this runtime offers on its own.
+fn aes_ecb_blocks(key: &[u8], blocks: &[u8], encrypt: bool) -> Result<Vec<u8>, CryptoError> {
+    let mut out = blocks.to_vec();
+    if encrypt {
+        lc_cipher::EncryptingKey::ecb(aes_key(key)?)
+            .and_then(|cipher| {
+                cipher.less_safe_encrypt(&mut out, lc_cipher::EncryptionContext::None)
+            })
+            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+    } else {
+        lc_cipher::DecryptingKey::ecb(aes_key(key)?)
+            .and_then(|cipher| cipher.decrypt(&mut out, lc_cipher::DecryptionContext::None))
+            .map_err(|_| CryptoError::DecryptionFailed(None))?;
     }
+    Ok(out)
 }
 
 // The tag lengths WebCrypto allows for AES-GCM.
@@ -150,25 +415,37 @@ fn aes_gcm_tag_len(tag_length: u8) -> Result<usize, CryptoError> {
     }
 }
 
-fn openssl_crypt(
-    cipher: Cipher,
-    mode: Mode,
-    key: &[u8],
-    iv: Option<&[u8]>,
-    data: &[u8],
-    pad: bool,
-) -> Result<Vec<u8>, openssl::error::ErrorStack> {
-    let mut crypter = Crypter::new(cipher, mode, key, iv)?;
-    crypter.pad(pad);
-    let mut out = vec![0u8; data.len() + cipher.block_size()];
-    let count = crypter.update(data, &mut out)?;
-    let rest = crypter.finalize(&mut out[count..])?;
-    out.truncate(count + rest);
-    Ok(out)
+fn aes_gcm_variant(key: &[u8], tag_length: u8) -> Result<AesGcmVariant, CryptoError> {
+    aes_gcm_tag_len(tag_length)?;
+    let key_bits = u16::try_from(key.len() * 8).map_err(|_| CryptoError::InvalidKey(None))?;
+    Ok(AesGcmVariant::new(key_bits, tag_length, key)?)
 }
 
-// RFC 3394. AWS-LC does not expose AES key wrap through the EVP cipher
-// interface, and `aws_lc_rs::key_wrap` has no 192-bit algorithm, so the
+fn aes_gcm_seal(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    additional_data: Option<&[u8]>,
+    tag_length: u8,
+) -> Result<Vec<u8>, CryptoError> {
+    aes_gcm_variant(key, tag_length)?
+        .encrypt(iv, data, additional_data)
+        .map_err(|_| CryptoError::EncryptionFailed(None))
+}
+
+fn aes_gcm_open(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    additional_data: Option<&[u8]>,
+    tag_length: u8,
+) -> Result<Vec<u8>, CryptoError> {
+    aes_gcm_variant(key, tag_length)?
+        .decrypt(iv, data, additional_data)
+        .map_err(|_| CryptoError::DecryptionFailed(None))
+}
+
+// RFC 3394. `aws_lc_rs::key_wrap` carries no 192-bit algorithm, so the
 // algorithm is run here over AES-ECB. `A` is the integrity value, starting at
 // the default IV the RFC fixes and which WebCrypto's AES-KW uses.
 const AES_KW_IV: [u8; 8] = [0xa6; 8];
@@ -177,7 +454,6 @@ fn aes_kw_wrap_rfc3394(kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if key.len() < 16 || !key.len().is_multiple_of(8) {
         return Err(CryptoError::InvalidLength);
     }
-    let cipher = aes_ecb_cipher(kek.len())?;
     let n = key.len() / 8;
     let mut a = AES_KW_IV;
     let mut r = key.to_vec();
@@ -187,8 +463,7 @@ fn aes_kw_wrap_rfc3394(kek: &[u8], key: &[u8]) -> Result<Vec<u8>, CryptoError> {
         for (i, chunk) in (1..=n).zip(r.chunks_mut(8)) {
             block[..8].copy_from_slice(&a);
             block[8..].copy_from_slice(chunk);
-            let out = openssl_crypt(cipher, Mode::Encrypt, kek, None, &block, false)
-                .map_err(|_| CryptoError::OperationFailed(None))?;
+            let out = aes_ecb_blocks(kek, &block, true)?;
             // t = n * j + i, xored into the low bytes of A.
             let t = j * n as u64 + i as u64;
             a.copy_from_slice(&out[..8]);
@@ -209,7 +484,6 @@ fn aes_kw_unwrap_rfc3394(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CryptoEr
     if wrapped.len() < 24 || !wrapped.len().is_multiple_of(8) {
         return Err(CryptoError::OperationFailed(None));
     }
-    let cipher = aes_ecb_cipher(kek.len())?;
     let n = wrapped.len() / 8 - 1;
     let mut a = <[u8; 8]>::try_from(&wrapped[..8]).map_err(|_| CryptoError::OperationFailed(None))?;
     let mut r = wrapped[8..].to_vec();
@@ -223,8 +497,7 @@ fn aes_kw_unwrap_rfc3394(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CryptoEr
                 *byte ^= t_byte;
             }
             block[8..].copy_from_slice(chunk);
-            let out = openssl_crypt(cipher, Mode::Decrypt, kek, None, &block, false)
-                .map_err(|_| CryptoError::OperationFailed(None))?;
+            let out = aes_ecb_blocks(kek, &block, false)?;
             a.copy_from_slice(&out[..8]);
             chunk.copy_from_slice(&out[8..]);
         }
@@ -232,17 +505,17 @@ fn aes_kw_unwrap_rfc3394(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CryptoEr
 
     // The integrity value is the whole point: a wrong KEK or a tampered
     // wrapping lands here and must not return a key.
-    if !openssl::memcmp::eq(&a, &AES_KW_IV) {
+    if lc_constant_time::verify_slices_are_equal(&a, &AES_KW_IV).is_err() {
         return Err(CryptoError::OperationFailed(None));
     }
     Ok(r)
 }
 
 // WebCrypto's AES-CTR `length` is the width of the counter field, and the
-// counter wraps inside that field alone. OpenSSL's own CTR mode always
-// increments the whole 128-bit block, so it cannot express a 32- or 64-bit
-// counter; the keystream is built here from ECB instead, which is what CTR is
-// defined as, with the increment applied at the requested width.
+// counter wraps inside that field alone. AWS-LC's own CTR always increments the
+// whole 128-bit block, so it cannot express a 32- or 64-bit counter; the
+// keystream is built here from ECB instead, which is what CTR is defined as,
+// with the increment applied at the requested width.
 fn ctr_increment(block: &mut [u8; 16], counter_length: u32) {
     let start = 16 - (counter_length as usize / 8);
     for byte in block[start..].iter_mut().rev() {
@@ -263,7 +536,6 @@ fn aes_ctr_apply(
     if !matches!(counter_length, 32 | 64 | 128) {
         return Err(CryptoError::InvalidKey(None));
     }
-    let cipher = aes_ecb_cipher(key.len())?;
     let mut counter = <[u8; 16]>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
 
     let mut out = data.to_vec();
@@ -276,8 +548,7 @@ fn aes_ctr_apply(
             counters.extend_from_slice(&counter);
             ctr_increment(&mut counter, counter_length);
         }
-        let keystream = openssl_crypt(cipher, Mode::Encrypt, key, None, &counters, false)
-            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        let keystream = aes_ecb_blocks(key, &counters, true)?;
         for (byte, k) in segment.iter_mut().zip(keystream.iter()) {
             *byte ^= k;
         }
@@ -285,114 +556,45 @@ fn aes_ctr_apply(
     Ok(out)
 }
 
-fn digest_message_digest_checked(algorithm: HashAlgorithm) -> Result<MessageDigest, CryptoError> {
-    match algorithm {
-        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
-        other => Ok(digest_message_digest(other)),
-    }
+pub enum RustDigest {
+    Lc(lc_digest::Context),
+    Md5(md5::Md5),
 }
-
-fn digest_message_digest(algorithm: HashAlgorithm) -> MessageDigest {
-    match algorithm {
-        HashAlgorithm::Md5 => MessageDigest::md5(),
-        HashAlgorithm::Sha1 => MessageDigest::sha1(),
-        HashAlgorithm::Sha256 => MessageDigest::sha256(),
-        HashAlgorithm::Sha384 => MessageDigest::sha384(),
-        HashAlgorithm::Sha512 => MessageDigest::sha512(),
-    }
-}
-
-// HMAC-MD5 has no WebCrypto or Node surface here; the previous provider
-// panicked on it and the enum arm has to stay total.
-fn hmac_md(algorithm: HashAlgorithm) -> &'static MdRef {
-    match algorithm {
-        HashAlgorithm::Md5 => Md::md5(),
-        HashAlgorithm::Sha1 => Md::sha1(),
-        HashAlgorithm::Sha256 => Md::sha256(),
-        HashAlgorithm::Sha384 => Md::sha384(),
-        HashAlgorithm::Sha512 => Md::sha512(),
-    }
-}
-
-fn rsa_md(hash_alg: HashAlgorithm) -> Result<&'static MdRef, CryptoError> {
-    match hash_alg {
-        HashAlgorithm::Sha1 => Ok(Md::sha1()),
-        HashAlgorithm::Sha256 => Ok(Md::sha256()),
-        HashAlgorithm::Sha384 => Ok(Md::sha384()),
-        HashAlgorithm::Sha512 => Ok(Md::sha512()),
-        HashAlgorithm::Md5 => Err(CryptoError::UnsupportedAlgorithm),
-    }
-}
-
-fn rsa_private_key(private_key_der: &[u8]) -> Result<PKey<openssl::pkey::Private>, CryptoError> {
-    let rsa = Rsa::private_key_from_der(private_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
-    PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))
-}
-
-fn rsa_public_key(public_key_der: &[u8]) -> Result<PKey<openssl::pkey::Public>, CryptoError> {
-    let rsa =
-        Rsa::public_key_from_der_pkcs1(public_key_der).map_err(|_| CryptoError::InvalidKey(None))?;
-    PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))
-}
-
-// An empty label and an absent one are the same input to OAEP, and OpenSSL
-// rejects a zero-length label rather than treating it as absent.
-fn rsa_configure_oaep<T>(
-    ctx: &mut PkeyCtx<T>,
-    md: &'static MdRef,
-    label: Option<&[u8]>,
-) -> Result<(), openssl::error::ErrorStack> {
-    ctx.set_rsa_padding(Padding::PKCS1_OAEP)?;
-    ctx.set_rsa_oaep_md(md)?;
-    ctx.set_rsa_mgf1_md(md)?;
-    if let Some(label) = label {
-        if !label.is_empty() {
-            ctx.set_rsa_oaep_label(label)?;
-        }
-    }
-    Ok(())
-}
-
-
-// Digest and HMAC both run on OpenSSL's EVP layer. `EVP_DigestUpdate` and
-// `EVP_DigestSignUpdate` cannot fail once their context is initialised, and the
-// algorithm set here is closed, so the only reachable failure is allocation.
-// Returning a short or empty digest instead would be a silently wrong answer.
-pub struct RustDigest(Hasher);
 
 impl SimpleDigest for RustDigest {
     fn update(&mut self, data: &[u8]) {
-        self.0.update(data).expect("EVP_DigestUpdate on an initialised context");
+        match self {
+            RustDigest::Lc(ctx) => ctx.update(data),
+            RustDigest::Md5(hasher) => Md5Digest::update(hasher, data),
+        }
     }
 
-    fn finalize(mut self) -> Vec<u8> {
-        self.0
-            .finish()
-            .expect("EVP_DigestFinal on an initialised context")
-            .to_vec()
+    fn finalize(self) -> Vec<u8> {
+        match self {
+            RustDigest::Lc(ctx) => ctx.finish().as_ref().to_vec(),
+            RustDigest::Md5(hasher) => hasher.finalize().to_vec(),
+        }
     }
 }
 
-pub struct RustHmac {
-    ctx: MdCtx,
-    // EVP_DigestSignInit keeps the key in the context, so it has to outlive it.
-    // Field order is drop order: `ctx` goes first.
-    _key: PKey<Private>,
+pub enum RustHmac {
+    Lc(Box<lc_hmac::Context>),
+    Md5(HmacMd5),
 }
 
 impl HmacProvider for RustHmac {
     fn update(&mut self, data: &[u8]) {
-        self.ctx
-            .digest_sign_update(data)
-            .expect("EVP_DigestSignUpdate on an initialised context");
+        match self {
+            RustHmac::Lc(ctx) => ctx.update(data),
+            RustHmac::Md5(mac) => Mac::update(mac, data),
+        }
     }
 
-    fn finalize(mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.ctx
-            .digest_sign_final_to_vec(&mut out)
-            .expect("EVP_DigestSignFinal on an initialised context");
-        out
+    fn finalize(self) -> Vec<u8> {
+        match self {
+            RustHmac::Lc(ctx) => ctx.sign().as_ref().to_vec(),
+            RustHmac::Md5(mac) => mac.finalize().into_bytes().to_vec(),
+        }
     }
 }
 
@@ -405,16 +607,22 @@ impl CryptoProvider for RustCryptoProvider {
     type Hmac = RustHmac;
 
     fn digest(&self, algorithm: HashAlgorithm) -> Self::Digest {
-        RustDigest(Hasher::new(digest_message_digest(algorithm)).expect("EVP_MD_CTX allocation"))
+        match algorithm {
+            HashAlgorithm::Md5 => RustDigest::Md5(md5::Md5::new()),
+            other => RustDigest::Lc(lc_digest::Context::new(lc_digest_algorithm(other))),
+        }
     }
 
     fn hmac(&self, algorithm: HashAlgorithm, key: &[u8]) -> Self::Hmac {
-        let key = PKey::hmac(key).expect("HMAC key of any length is accepted by EVP_PKEY_new_mac_key");
-        let mut ctx = MdCtx::new().expect("EVP_MD_CTX allocation");
-        ctx
-            .digest_sign_init(Some(hmac_md(algorithm)), &key)
-            .expect("EVP_DigestSignInit with a known digest and a MAC key");
-        RustHmac { ctx, _key: key }
+        match algorithm {
+            HashAlgorithm::Md5 => RustHmac::Md5(
+                HmacMd5::new_from_slice(key).expect("HMAC accepts a key of any length"),
+            ),
+            other => {
+                let key = lc_hmac::Key::new(lc_hmac_algorithm(other), key);
+                RustHmac::Lc(Box::new(lc_hmac::Context::with_key(&key)))
+            },
+        }
     }
 
     fn ecdsa_sign(
@@ -423,9 +631,14 @@ impl CryptoProvider for RustCryptoProvider {
         private_key_der: &[u8],
         digest: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let key = ec_private_key(curve, private_key_der)?;
-        let sig = EcdsaSig::sign(digest, &key).map_err(|_| CryptoError::SigningFailed(None))?;
-        Ok(ecdsa_sig_to_raw(&sig, ec_field_len(curve)))
+        let (algorithm, hash) = ecdsa_signing_algorithm(curve, digest.len())?;
+        let key = LcEcdsaKeyPair::from_pkcs8(algorithm, private_key_der)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let prehashed = lc_digest::Digest::import_less_safe(digest, hash)
+            .map_err(|_| CryptoError::SigningFailed(None))?;
+        key.sign_digest(&prehashed)
+            .map(|signature| signature.as_ref().to_vec())
+            .map_err(|_| CryptoError::SigningFailed(None))
     }
 
     fn ecdsa_verify(
@@ -435,23 +648,21 @@ impl CryptoProvider for RustCryptoProvider {
         signature: &[u8],
         digest: &[u8],
     ) -> Result<bool, CryptoError> {
-        let key = ec_public_key(curve, public_key_sec1)?;
-        let Ok(sig) = ecdsa_sig_from_raw(signature, ec_field_len(curve)) else {
+        let (algorithm, hash) = ecdsa_verification_algorithm(curve, digest.len())?;
+        let Ok(prehashed) = lc_digest::Digest::import_less_safe(digest, hash) else {
             return Ok(false);
         };
-        Ok(sig.verify(digest, &key).unwrap_or(false))
+        let key = lc_signature::ParsedPublicKey::new(algorithm, public_key_sec1)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        Ok(key.verify_digest_sig(&prehashed, signature).is_ok())
     }
 
     fn ed25519_sign(&self, private_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let key = PKey::private_key_from_pkcs8(private_key_der)
+        // Ed25519 hashes internally, so it signs the message rather than a
+        // digest of it.
+        let key = LcEd25519KeyPair::from_pkcs8(private_key_der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        // Ed25519 hashes internally, so it signs the message in one shot rather
-        // than through a digest context.
-        let mut signer =
-            Signer::new_without_digest(&key).map_err(|_| CryptoError::SigningFailed(None))?;
-        signer
-            .sign_oneshot_to_vec(data)
-            .map_err(|_| CryptoError::SigningFailed(None))
+        Ok(key.sign(data).as_ref().to_vec())
     }
 
     fn ed25519_verify(
@@ -460,11 +671,8 @@ impl CryptoProvider for RustCryptoProvider {
         signature: &[u8],
         data: &[u8],
     ) -> Result<bool, CryptoError> {
-        let key = PKey::public_key_from_raw_bytes(public_key_bytes, Id::ED25519)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let mut verifier =
-            Verifier::new_without_digest(&key).map_err(|_| CryptoError::InvalidKey(None))?;
-        Ok(verifier.verify_oneshot(signature, data).unwrap_or(false))
+        let key = lc_signature::UnparsedPublicKey::new(&lc_signature::ED25519, public_key_bytes);
+        Ok(key.verify(data, signature).is_ok())
     }
 
     fn rsa_pss_sign(
@@ -474,23 +682,15 @@ impl CryptoProvider for RustCryptoProvider {
         salt_length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_private_key(private_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.sign_init().map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.set_rsa_padding(Padding::PKCS1_PSS)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.set_signature_md(md)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.set_rsa_mgf1_md(md)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        let salt = c_int::try_from(salt_length).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
-        ctx.set_rsa_pss_saltlen(RsaPssSaltlen::custom(salt))
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        let mut signature = Vec::new();
-        ctx.sign_to_vec(digest, &mut signature)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        Ok(signature)
+        let (encoding, algorithm) = rsa_pss_encoding(hash_alg)?;
+        // AWS-LC fixes the PSS salt at the digest length and exposes no way to
+        // ask for another, so a caller-chosen saltLength is only honoured when
+        // it already agrees rather than silently producing a different
+        // signature from the one that was asked for.
+        if salt_length != algorithm.output_len() {
+            return Err(CryptoError::UnsupportedAlgorithm);
+        }
+        rsa_sign_prehashed(private_key_der, digest, encoding, algorithm)
     }
 
     fn rsa_pss_verify(
@@ -501,20 +701,11 @@ impl CryptoProvider for RustCryptoProvider {
         salt_length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<bool, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_public_key(public_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.verify_init().map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.set_rsa_padding(Padding::PKCS1_PSS)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.set_signature_md(md)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.set_rsa_mgf1_md(md)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let salt = c_int::try_from(salt_length).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
-        ctx.set_rsa_pss_saltlen(RsaPssSaltlen::custom(salt))
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        Ok(ctx.verify(digest, signature).unwrap_or(false))
+        let (params, algorithm) = rsa_pss_params(hash_alg)?;
+        if salt_length != algorithm.output_len() {
+            return Err(CryptoError::UnsupportedAlgorithm);
+        }
+        rsa_verify_prehashed(public_key_der, signature, digest, params, algorithm)
     }
 
     fn rsa_pkcs1v15_sign(
@@ -523,18 +714,8 @@ impl CryptoProvider for RustCryptoProvider {
         digest: &[u8],
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_private_key(private_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.sign_init().map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.set_rsa_padding(Padding::PKCS1)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        ctx.set_signature_md(md)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        let mut signature = Vec::new();
-        ctx.sign_to_vec(digest, &mut signature)
-            .map_err(|_| CryptoError::SigningFailed(None))?;
-        Ok(signature)
+        let (encoding, algorithm) = rsa_pkcs1_encoding(hash_alg)?;
+        rsa_sign_prehashed(private_key_der, digest, encoding, algorithm)
     }
 
     fn rsa_pkcs1v15_verify(
@@ -544,15 +725,8 @@ impl CryptoProvider for RustCryptoProvider {
         digest: &[u8],
         hash_alg: HashAlgorithm,
     ) -> Result<bool, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_public_key(public_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.verify_init().map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.set_rsa_padding(Padding::PKCS1)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        ctx.set_signature_md(md)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        Ok(ctx.verify(digest, signature).unwrap_or(false))
+        let (params, algorithm) = rsa_pkcs1_params(hash_alg)?;
+        rsa_verify_prehashed(public_key_der, signature, digest, params, algorithm)
     }
 
     fn rsa_oaep_encrypt(
@@ -562,15 +736,17 @@ impl CryptoProvider for RustCryptoProvider {
         hash_alg: HashAlgorithm,
         label: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_public_key(public_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::EncryptionFailed(None))?;
-        ctx.encrypt_init()
-            .map_err(|_| CryptoError::EncryptionFailed(None))?;
-        rsa_configure_oaep(&mut ctx, md, label).map_err(|_| CryptoError::EncryptionFailed(None))?;
-        let mut out = Vec::new();
-        ctx.encrypt_to_vec(data, &mut out)
-            .map_err(|_| CryptoError::EncryptionFailed(None))?;
+        let algorithm = rsa_oaep_algorithm(hash_alg)?;
+        let public_key = LcRsaPublicEncryptingKey::from_der(&rsa_spki_from_pkcs1(public_key_der)?)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let key = LcRsaOaepPublicEncryptingKey::new(public_key)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let mut out = vec![0u8; key.ciphertext_size()];
+        let written = key
+            .encrypt(algorithm, data, &mut out, oaep_label(label))
+            .map_err(|_| CryptoError::EncryptionFailed(None))?
+            .len();
+        out.truncate(written);
         Ok(out)
     }
 
@@ -581,15 +757,18 @@ impl CryptoProvider for RustCryptoProvider {
         hash_alg: HashAlgorithm,
         label: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
-        let md = rsa_md(hash_alg)?;
-        let key = rsa_private_key(private_key_der)?;
-        let mut ctx = PkeyCtx::new(&key).map_err(|_| CryptoError::DecryptionFailed(None))?;
-        ctx.decrypt_init()
-            .map_err(|_| CryptoError::DecryptionFailed(None))?;
-        rsa_configure_oaep(&mut ctx, md, label).map_err(|_| CryptoError::DecryptionFailed(None))?;
-        let mut out = Vec::new();
-        ctx.decrypt_to_vec(data, &mut out)
-            .map_err(|_| CryptoError::DecryptionFailed(None))?;
+        let algorithm = rsa_oaep_algorithm(hash_alg)?;
+        let private_key =
+            LcRsaPrivateDecryptingKey::from_pkcs8(&rsa_pkcs8_from_pkcs1(private_key_der)?)
+                .map_err(|_| CryptoError::InvalidKey(None))?;
+        let key = LcRsaOaepPrivateDecryptingKey::new(private_key)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let mut out = vec![0u8; key.min_output_size()];
+        let written = key
+            .decrypt(algorithm, data, &mut out, oaep_label(label))
+            .map_err(|_| CryptoError::DecryptionFailed(None))?
+            .len();
+        out.truncate(written);
         Ok(out)
     }
 
@@ -599,21 +778,15 @@ impl CryptoProvider for RustCryptoProvider {
         private_key_der: &[u8],
         public_key_sec1: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let private_key = PKey::from_ec_key(ec_private_key(curve, private_key_der)?)
+        let algorithm = ecdh_algorithm(curve);
+        let private_key = LcAgreementPrivateKey::from_private_key_der(algorithm, private_key_der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        let peer = PKey::from_ec_key(ec_public_key(curve, public_key_sec1)?)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let mut deriver = Deriver::new(&private_key)
-            .map_err(|_| CryptoError::DerivationFailed(None))?;
-        deriver
-            .set_peer(&peer)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
+        let peer = lc_agreement::UnparsedPublicKey::new(algorithm, public_key_sec1);
         // ECDH yields the x coordinate at the curve's field width, which is
         // what WebCrypto's deriveBits counts its length against.
-        let shared = deriver
-            .derive_to_vec()
-            .map_err(|_| CryptoError::DerivationFailed(None))?;
-        Ok(shared)
+        lc_agreement::agree(&private_key, peer, CryptoError::DerivationFailed(None), |secret| {
+            Ok(secret.to_vec())
+        })
     }
 
     fn x25519_derive_bits(
@@ -621,21 +794,20 @@ impl CryptoProvider for RustCryptoProvider {
         private_key: &[u8],
         public_key: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        let private = PKey::private_key_from_raw_bytes(private_key, Id::X25519)
+        // This provider carries X25519 keys as the raw scalar and point rather
+        // than wrapped in PKCS#8.
+        let private_key = LcAgreementPrivateKey::from_private_key(&lc_agreement::X25519, private_key)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        let public = PKey::public_key_from_raw_bytes(public_key, Id::X25519)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let mut deriver =
-            Deriver::new(&private).map_err(|_| CryptoError::DerivationFailed(None))?;
-        deriver
-            .set_peer(&public)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let shared = deriver
-            .derive_to_vec()
-            .map_err(|_| CryptoError::DerivationFailed(None))?;
-        // An all-zero secret means a small-order peer point, which RFC 7748
-        // says to reject.
-        if shared.iter().all(|b| *b == 0) {
+        let peer = lc_agreement::UnparsedPublicKey::new(&lc_agreement::X25519, public_key);
+        let shared = lc_agreement::agree(
+            &private_key,
+            peer,
+            CryptoError::DerivationFailed(None),
+            |secret| Ok(secret.to_vec()),
+        )?;
+        // RFC 7748 says to reject an all-zero secret, which is what a
+        // small-order peer point produces.
+        if shared.iter().all(|byte| *byte == 0) {
             return Err(CryptoError::OperationFailed(None));
         }
         Ok(shared)
@@ -650,28 +822,10 @@ impl CryptoProvider for RustCryptoProvider {
         additional_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
         match mode {
-            AesMode::Cbc => {
-                let cipher = aes_cbc_cipher(key.len())?;
-                openssl_crypt(cipher, Mode::Encrypt, key, Some(iv), data, true)
-                    .map_err(|_| CryptoError::EncryptionFailed(None))
-            },
+            AesMode::Cbc => aes_cbc(key, iv, data, true),
             AesMode::Ctr { counter_length } => aes_ctr_apply(key, iv, counter_length, data),
             AesMode::Gcm { tag_length } => {
-                let cipher = aes_gcm_cipher(key.len())?;
-                let tag_len = aes_gcm_tag_len(tag_length)?;
-                let mut tag = vec![0u8; tag_len];
-                let mut ciphertext = openssl::symm::encrypt_aead(
-                    cipher,
-                    key,
-                    Some(iv),
-                    additional_data.unwrap_or_default(),
-                    data,
-                    &mut tag,
-                )
-                .map_err(|_| CryptoError::EncryptionFailed(None))?;
-                // WebCrypto returns the tag appended to the ciphertext.
-                ciphertext.extend_from_slice(&tag);
-                Ok(ciphertext)
+                aes_gcm_seal(key, iv, data, additional_data, tag_length)
             },
         }
     }
@@ -685,28 +839,10 @@ impl CryptoProvider for RustCryptoProvider {
         additional_data: Option<&[u8]>,
     ) -> Result<Vec<u8>, CryptoError> {
         match mode {
-            AesMode::Cbc => {
-                let cipher = aes_cbc_cipher(key.len())?;
-                openssl_crypt(cipher, Mode::Decrypt, key, Some(iv), data, true)
-                    .map_err(|_| CryptoError::DecryptionFailed(None))
-            },
+            AesMode::Cbc => aes_cbc(key, iv, data, false),
             AesMode::Ctr { counter_length } => aes_ctr_apply(key, iv, counter_length, data),
             AesMode::Gcm { tag_length } => {
-                let cipher = aes_gcm_cipher(key.len())?;
-                let tag_len = aes_gcm_tag_len(tag_length)?;
-                if data.len() < tag_len {
-                    return Err(CryptoError::DecryptionFailed(None));
-                }
-                let (ciphertext, tag) = data.split_at(data.len() - tag_len);
-                openssl::symm::decrypt_aead(
-                    cipher,
-                    key,
-                    Some(iv),
-                    additional_data.unwrap_or_default(),
-                    ciphertext,
-                    tag,
-                )
-                .map_err(|_| CryptoError::DecryptionFailed(None))
+                aes_gcm_open(key, iv, data, additional_data, tag_length)
             },
         }
     }
@@ -727,18 +863,12 @@ impl CryptoProvider for RustCryptoProvider {
         length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
-        let md = rsa_md(hash_alg)?;
+        let algorithm = lc_hkdf_algorithm(hash_alg)?;
         let mut out = vec![0u8; length];
-        openssl::pkey_ctx::PkeyCtx::new_id(openssl::pkey::Id::HKDF)
-            .and_then(|mut ctx| {
-                ctx.derive_init()?;
-                ctx.set_hkdf_md(md)?;
-                ctx.set_hkdf_key(key)?;
-                ctx.set_hkdf_salt(salt)?;
-                ctx.add_hkdf_info(info)?;
-                ctx.derive(Some(&mut out))?;
-                Ok(())
-            })
+        lc_hkdf::Salt::new(algorithm, salt)
+            .extract(key)
+            .expand(&[info], HkdfLen(length))
+            .and_then(|okm| okm.fill(&mut out))
             .map_err(|_| CryptoError::DerivationFailed(None))?;
         Ok(out)
     }
@@ -751,12 +881,10 @@ impl CryptoProvider for RustCryptoProvider {
         length: usize,
         hash_alg: HashAlgorithm,
     ) -> Result<Vec<u8>, CryptoError> {
+        let algorithm = lc_pbkdf2_algorithm(hash_alg)?;
         let iterations = NonZeroU32::new(iterations).ok_or(CryptoError::InvalidData(None))?;
-        let digest = digest_message_digest_checked(hash_alg)?;
         let mut out = vec![0; length];
-        let iter = usize::try_from(iterations.get()).map_err(|_| CryptoError::InvalidData(None))?;
-        openssl::pkcs5::pbkdf2_hmac(password, salt, iter, digest, &mut out)
-            .map_err(|_| CryptoError::InvalidLength)?;
+        lc_pbkdf2::derive(algorithm, iterations, salt, password, &mut out);
         Ok(out)
     }
 
@@ -787,37 +915,49 @@ impl CryptoProvider for RustCryptoProvider {
     }
 
     fn generate_ec_key(&self, curve: EllipticCurve) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-        let group = ec_group(curve)?;
-        let key = EcKey::generate(&group).map_err(|_| CryptoError::OperationFailed(None))?;
-        let public_key = ec_point_bytes(&key)?;
-        let private_key = PKey::from_ec_key(key)
-            .and_then(|k| k.private_key_to_pkcs8())
+        // Generated through the agreement side so the pair is usable for both
+        // ECDH and ECDSA; the signing algorithms differ per hash, and a key
+        // does not carry one.
+        let private_key = LcAgreementPrivateKey::generate(ecdh_algorithm(curve))
             .map_err(|_| CryptoError::OperationFailed(None))?;
-        Ok((private_key, public_key))
+        let public_key = private_key
+            .compute_public_key()
+            .map_err(|_| CryptoError::OperationFailed(None))?
+            .as_ref()
+            .to_vec();
+        let pkcs8 = AsDer::<Pkcs8V1Der<'_>>::as_der(&private_key)
+            .map_err(|_| CryptoError::OperationFailed(None))?
+            .as_ref()
+            .to_vec();
+        Ok((pkcs8, public_key))
     }
 
     fn generate_ed25519_key(&self) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-        let key = PKey::generate_ed25519().map_err(|_| CryptoError::OperationFailed(None))?;
-        let public_key = key
-            .raw_public_key()
-            .map_err(|_| CryptoError::OperationFailed(None))?;
+        let key = LcEd25519KeyPair::generate().map_err(|_| CryptoError::OperationFailed(None))?;
+        let public_key = key.public_key().as_ref().to_vec();
         let private_key = key
-            .private_key_to_pkcs8()
-            .map_err(|_| CryptoError::OperationFailed(None))?;
+            .to_pkcs8v1()
+            .map_err(|_| CryptoError::OperationFailed(None))?
+            .as_ref()
+            .to_vec();
         Ok((private_key, public_key))
     }
 
     fn generate_x25519_key(&self) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-        let key = PKey::generate_x25519().map_err(|_| CryptoError::OperationFailed(None))?;
-        // X25519 keys are carried here as the raw 32-byte scalar and point,
-        // not as PKCS#8.
-        let private_key = key
-            .raw_private_key()
+        let private_key = LcAgreementPrivateKey::generate(&lc_agreement::X25519)
             .map_err(|_| CryptoError::OperationFailed(None))?;
-        let public_key = key
-            .raw_public_key()
-            .map_err(|_| CryptoError::OperationFailed(None))?;
-        Ok((private_key, public_key))
+        let public_key = private_key
+            .compute_public_key()
+            .map_err(|_| CryptoError::OperationFailed(None))?
+            .as_ref()
+            .to_vec();
+        // Stored as the raw scalar, which is how the rest of this provider and
+        // the OKP import and export paths carry it.
+        let raw = AsBigEndian::<Curve25519SeedBin<'_>>::as_be_bytes(&private_key)
+            .map_err(|_| CryptoError::OperationFailed(None))?
+            .as_ref()
+            .to_vec();
+        Ok((raw, public_key))
     }
 
     fn generate_rsa_key(
@@ -825,17 +965,35 @@ impl CryptoProvider for RustCryptoProvider {
         modulus_length: u32,
         public_exponent: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-        let exponent = parse_rsa_public_exponent(public_exponent)?;
-        let e = BigNum::from_u32(u32::try_from(exponent).map_err(|_| CryptoError::OperationFailed(None))?)
+        // AWS-LC generates from a fixed set of sizes and always with e = 65537.
+        // Anything else is refused rather than quietly generating a key the
+        // caller did not ask for.
+        if parse_rsa_public_exponent(public_exponent)? != 65537 {
+            return Err(CryptoError::UnsupportedAlgorithm);
+        }
+        let size = match modulus_length {
+            2048 => LcRsaKeySize::Rsa2048,
+            3072 => LcRsaKeySize::Rsa3072,
+            4096 => LcRsaKeySize::Rsa4096,
+            8192 => LcRsaKeySize::Rsa8192,
+            _ => return Err(CryptoError::UnsupportedAlgorithm),
+        };
+        let key = LcRsaKeyPair::generate(size).map_err(|_| CryptoError::OperationFailed(None))?;
+        // The provider stores RSA keys as PKCS#1; AWS-LC hands back PKCS#8, so
+        // the inner key is taken out of it.
+        let pkcs8 = AsDer::<Pkcs8V1Der<'_>>::as_der(&key)
             .map_err(|_| CryptoError::OperationFailed(None))?;
-        let key = Rsa::generate_with_e(modulus_length, &e)
-            .map_err(|_| CryptoError::OperationFailed(None))?;
-        let private_key = key
-            .private_key_to_der()
-            .map_err(|_| CryptoError::OperationFailed(None))?;
-        let public_key = key
-            .public_key_to_der_pkcs1()
-            .map_err(|_| CryptoError::OperationFailed(None))?;
+        let private_key = rsa_pkcs1_from_pkcs8(pkcs8.as_ref())?;
+        let public_key = pkcs1::RsaPrivateKey::from_der(&private_key)
+            .map_err(|_| CryptoError::OperationFailed(None))
+            .and_then(|k| {
+                pkcs1::RsaPublicKey {
+                    modulus: k.modulus,
+                    public_exponent: k.public_exponent,
+                }
+                .to_der()
+                .map_err(|_| CryptoError::OperationFailed(None))
+            })?;
         Ok((private_key, public_key))
     }
 
@@ -946,11 +1104,11 @@ impl CryptoProvider for RustCryptoProvider {
     }
 
     fn export_rsa_private_key_pkcs8(&self, key_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let rsa = Rsa::private_key_from_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
-        let key = PKey::from_rsa(rsa).map_err(|_| CryptoError::InvalidKey(None))?;
-        key
-            .private_key_to_pkcs8()
-            .map_err(|_| CryptoError::InvalidKey(None))
+        // PKCS#8 is the PKCS#1 key this provider stores, wrapped in an
+        // algorithm identifier. That is ASN.1 only, so no key parsing is
+        // needed and a malformed key still fails here.
+        pkcs1::RsaPrivateKey::from_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
+        rsa_pkcs8_from_pkcs1(key_data)
     }
 
     fn import_ec_public_key_sec1(
@@ -958,11 +1116,18 @@ impl CryptoProvider for RustCryptoProvider {
         data: &[u8],
         curve: EllipticCurve,
     ) -> Result<super::EcImportResult, CryptoError> {
-        // Parsing validates that the point is on the curve; re-encoding
-        // normalises a compressed point to the uncompressed form stored here.
-        let key = ec_public_key(curve, data)?;
+        // Parsing validates that the point is on the curve. WebCrypto's raw EC
+        // format is the uncompressed point, and the rest of this provider
+        // splits it on that shape, so a compressed one is refused rather than
+        // stored as something the JWK export cannot read.
+        let key = lc_agreement::UnparsedPublicKey::new(ecdh_algorithm(curve), data);
+        let _: lc_agreement::ParsedPublicKey =
+            key.try_into().map_err(|_| CryptoError::InvalidKey(None))?;
+        if data.len() != 1 + 2 * ec_field_len(curve) || data[0] != 0x04 {
+            return Err(CryptoError::InvalidKey(None));
+        }
         Ok(super::EcImportResult {
-            key_data: ec_point_bytes(&key)?,
+            key_data: data.to_vec(),
             is_private: false,
         })
     }
@@ -993,22 +1158,8 @@ impl CryptoProvider for RustCryptoProvider {
         data: &[u8],
         curve: EllipticCurve,
     ) -> Result<super::EcImportResult, CryptoError> {
-        // SEC1 here is the bare scalar, so the public point is derived from it
-        // before the key is stored in this provider's PKCS#8 form.
-        let group = ec_group(curve)?;
-        let private_number = BigNum::from_slice(data).map_err(|_| CryptoError::InvalidKey(None))?;
-        let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-        let mut point = EcPoint::new(&group).map_err(|_| CryptoError::OperationFailed(None))?;
-        point
-            .mul_generator2(&group, &private_number, &mut ctx)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let key = EcKey::from_private_components(&group, &private_number, &point)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        let pkcs8_der = PKey::from_ec_key(key)
-            .and_then(|k| k.private_key_to_pkcs8())
-            .map_err(|_| CryptoError::OperationFailed(None))?;
         Ok(super::EcImportResult {
-            key_data: pkcs8_der,
+            key_data: ec_pkcs8_from_scalar(curve, data)?,
             is_private: true,
         })
     }
@@ -1020,7 +1171,11 @@ impl CryptoProvider for RustCryptoProvider {
         is_private: bool,
     ) -> Result<Vec<u8>, CryptoError> {
         if is_private {
-            ec_point_bytes(ec_private_key(curve, key_data)?.as_ref())
+            let key = LcAgreementPrivateKey::from_private_key_der(ecdh_algorithm(curve), key_data)
+                .map_err(|_| CryptoError::InvalidKey(None))?;
+            key.compute_public_key()
+                .map(|public| public.as_ref().to_vec())
+                .map_err(|_| CryptoError::OperationFailed(None))
         } else {
             // key_data is already SEC1 encoded
             Ok(key_data.to_vec())
@@ -1032,13 +1187,22 @@ impl CryptoProvider for RustCryptoProvider {
         key_data: &[u8],
         curve: EllipticCurve,
     ) -> Result<Vec<u8>, CryptoError> {
-        // Built from the parsed point rather than by wrapping `key_data`
-        // verbatim, so a caller that passes private key material gets a
-        // rejection instead of an SPKI with the private key inside it.
-        let key = ec_public_key(curve, key_data)?;
-        PKey::from_ec_key(key)
-            .and_then(|k| k.public_key_to_der())
-            .map_err(|_| CryptoError::InvalidKey(None))
+        // The point is parsed first, so a caller that passes private key
+        // material gets a rejection rather than an SPKI with the private key
+        // wrapped inside it.
+        let key = lc_agreement::UnparsedPublicKey::new(ecdh_algorithm(curve), key_data);
+        let _: lc_agreement::ParsedPublicKey =
+            key.try_into().map_err(|_| CryptoError::InvalidKey(None))?;
+
+        let spki = spki::SubjectPublicKeyInfo {
+            algorithm: spki::AlgorithmIdentifier::<der::asn1::ObjectIdentifier> {
+                oid: const_oid::db::rfc5912::ID_EC_PUBLIC_KEY,
+                parameters: Some(ec_curve_oid(curve)),
+            },
+            subject_public_key: spki::der::asn1::BitString::from_bytes(key_data)
+                .map_err(|_| CryptoError::InvalidKey(None))?,
+        };
+        spki.to_der().map_err(|_| CryptoError::InvalidKey(None))
     }
 
     fn export_ec_private_key_pkcs8(
@@ -1251,23 +1415,10 @@ impl CryptoProvider for RustCryptoProvider {
         curve: EllipticCurve,
     ) -> Result<super::EcImportResult, CryptoError> {
         if let Some(d) = jwk.d {
-            // JWK carries the scalar alone; the public point has to be derived
-            // from it before OpenSSL will accept the key.
-            let group = ec_group(curve)?;
-            let private_number =
-                BigNum::from_slice(d).map_err(|_| CryptoError::InvalidKey(None))?;
-            let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-            let mut point = EcPoint::new(&group).map_err(|_| CryptoError::OperationFailed(None))?;
-            point
-                .mul_generator2(&group, &private_number, &mut ctx)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-            let key = EcKey::from_private_components(&group, &private_number, &point)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-            let pkcs8_der = PKey::from_ec_key(key)
-                .and_then(|k| k.private_key_to_pkcs8())
-                .map_err(|_| CryptoError::OperationFailed(None))?;
+            // A JWK carries the scalar alone, and AWS-LC derives the point from
+            // it when the key is built.
             Ok(super::EcImportResult {
-                key_data: pkcs8_der,
+                key_data: ec_pkcs8_from_scalar(curve, d)?,
                 is_private: true,
             })
         } else {
@@ -1291,17 +1442,23 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::EcJwkExport, CryptoError> {
         let coord_len = ec_field_len(curve);
         if is_private {
-            let key = ec_private_key(curve, key_data)?;
-            let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-            let mut x = BigNum::new().map_err(|_| CryptoError::OperationFailed(None))?;
-            let mut y = BigNum::new().map_err(|_| CryptoError::OperationFailed(None))?;
-            key.public_key()
-                .affine_coordinates(key.group(), &mut x, &mut y, &mut ctx)
+            let key = LcAgreementPrivateKey::from_private_key_der(ecdh_algorithm(curve), key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
+            let point = key
+                .compute_public_key()
+                .map_err(|_| CryptoError::OperationFailed(None))?;
+            let point = point.as_ref();
+            // The uncompressed point is 0x04 followed by x and y at the field
+            // width, which is what the JWK coordinates are.
+            if point.len() != 1 + 2 * coord_len || point[0] != 0x04 {
+                return Err(CryptoError::InvalidKey(None));
+            }
+            let scalar = AsBigEndian::<EcPrivateKeyBin<'_>>::as_be_bytes(&key)
+                .map_err(|_| CryptoError::OperationFailed(None))?;
             Ok(super::EcJwkExport {
-                x: ec_pad(&x, coord_len),
-                y: ec_pad(&y, coord_len),
-                d: Some(ec_pad(key.private_key(), coord_len)),
+                x: point[1..1 + coord_len].to_vec(),
+                y: point[1 + coord_len..].to_vec(),
+                d: Some(scalar.as_ref().to_vec()),
             })
         } else {
             // key_data is SEC1 uncompressed point (0x04 || x || y)

@@ -117,11 +117,14 @@ fn verify(
             hmac.update(data);
             let computed_signature = hmac.finalize();
 
-            // `memcmp::eq` asserts equal lengths, and `signature` is caller
-            // supplied, so the length is checked before the constant-time
-            // comparison rather than inside it.
-            computed_signature.len() == signature.len()
-                && openssl::memcmp::eq(computed_signature.as_slice(), signature)
+            // A caller-supplied signature of the wrong length has to compare
+            // false rather than abort; this one answers that without a length
+            // guard of its own.
+            aws_lc_rs::constant_time::verify_slices_are_equal(
+                computed_signature.as_slice(),
+                signature,
+            )
+            .is_ok()
         },
         SigningAlgorithm::MlDsa { variant, context } => {
             if !matches!(&key.algorithm, KeyAlgorithm::MlDsa(key_variant) if key_variant == variant)

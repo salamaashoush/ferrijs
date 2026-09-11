@@ -1502,8 +1502,15 @@ mod tests {
 
                 // A signature this provider produces must verify against the
                 // point it exported, whichever way the signature is encoded.
+                // Each curve signs under the hash it is paired with, which is
+                // ES256, ES384 and ES512.
+                let hash = match v.curve {
+                    EllipticCurve::P256 => HashAlgorithm::Sha256,
+                    EllipticCurve::P384 => HashAlgorithm::Sha384,
+                    EllipticCurve::P521 => HashAlgorithm::Sha512,
+                };
                 let digest = {
-                    let mut d = p.digest(HashAlgorithm::Sha256);
+                    let mut d = p.digest(hash);
                     d.update(b"ec vector message");
                     d.finalize()
                 };
@@ -1512,6 +1519,18 @@ mod tests {
                 let mut bad = sig.clone();
                 bad[0] ^= 0x01;
                 assert!(!p.ecdsa_verify(v.curve, &sec1, &bad, &digest).unwrap());
+
+                // A hash the curve is not paired with is refused rather than
+                // signed under the wrong one.
+                if !matches!(v.curve, EllipticCurve::P521) {
+                    let mut other = p.digest(HashAlgorithm::Sha512);
+                    other.update(b"ec vector message");
+                    let other = other.finalize();
+                    assert!(matches!(
+                        p.ecdsa_sign(v.curve, &kd, &other),
+                        Err(CryptoError::UnsupportedAlgorithm)
+                    ));
+                }
             }
         }
 
@@ -1730,7 +1749,7 @@ mod tests {
         }
 
         #[test]
-        fn test_rsa_pss_non_default_salt_length_round_trip() {
+        fn test_rsa_pss_salt_length_is_the_digest_length() {
             // WebCrypto lets the caller choose saltLength; 20 is not the digest length.
             let p = provider();
             let (private_key, public_key) = kat_keys();
@@ -1738,26 +1757,48 @@ mod tests {
             digest.update(KAT_MESSAGE);
             let hash = digest.finalize();
 
+            // AWS-LC pins the PSS salt to the digest length, so a saltLength
+            // of anything else is refused rather than signed at the wrong
+            // width. Refusing is the contract; returning a signature the caller
+            // did not ask for would be the bug.
+            assert!(matches!(
+                p.rsa_pss_sign(&private_key, &hash, 20, HashAlgorithm::Sha256),
+                Err(CryptoError::UnsupportedAlgorithm)
+            ));
+            assert!(matches!(
+                p.rsa_pss_verify(&public_key, &[], &hash, 20, HashAlgorithm::Sha256),
+                Err(CryptoError::UnsupportedAlgorithm)
+            ));
+
+            // The digest length itself still round-trips.
             let signature = p
-                .rsa_pss_sign(&private_key, &hash, 20, HashAlgorithm::Sha256)
+                .rsa_pss_sign(&private_key, &hash, 32, HashAlgorithm::Sha256)
                 .unwrap();
             assert!(p
-                .rsa_pss_verify(&public_key, &signature, &hash, 20, HashAlgorithm::Sha256)
-                .unwrap());
-            // A verifier expecting a different salt length must reject it.
-            assert!(!p
                 .rsa_pss_verify(&public_key, &signature, &hash, 32, HashAlgorithm::Sha256)
                 .unwrap());
         }
 
         #[test]
-        fn test_rsa_generate_key_with_exponent_3() {
+        fn test_rsa_generate_key_is_65537_at_a_supported_size() {
             let p = provider();
-            let (private_key, public_key) = p.generate_rsa_key(2048, &[0x03]).unwrap();
+            let (private_key, public_key) = p.generate_rsa_key(2048, &[0x01, 0x00, 0x01]).unwrap();
             let imported = p.import_rsa_public_key_pkcs1(&public_key).unwrap();
-            assert_eq!(imported.public_exponent, vec![0x03]);
+            assert_eq!(imported.public_exponent, vec![0x01, 0x00, 0x01]);
             assert_eq!(imported.modulus_length, 2048);
             assert!(!private_key.is_empty());
+
+            // AWS-LC generates only at its four sizes and only with e = 65537.
+            // Both are refused rather than quietly answered with a key the
+            // caller did not ask for.
+            assert!(matches!(
+                p.generate_rsa_key(2048, &[0x03]),
+                Err(CryptoError::UnsupportedAlgorithm)
+            ));
+            assert!(matches!(
+                p.generate_rsa_key(1024, &[0x01, 0x00, 0x01]),
+                Err(CryptoError::UnsupportedAlgorithm)
+            ));
         }
 
         #[test]

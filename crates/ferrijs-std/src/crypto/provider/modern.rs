@@ -13,11 +13,7 @@ use ml_kem::{
     B32 as MlKemRandomness,
 };
 
-use openssl::bn::{BigNum, BigNumContext};
-use openssl::derive::Deriver;
-use openssl::ec::{EcGroup, EcKey, EcPoint, PointConversionForm};
-use openssl::nid::Nid;
-use openssl::pkey::{Id, PKey, Private, Public};
+use aws_lc_rs::{aead as lc_aead, agreement as lc_agreement, digest as lc_digest};
 
 use super::{CryptoError, HybridKemVariant, MlDsaVariant, MlKemVariant};
 
@@ -57,8 +53,20 @@ macro_rules! dispatch_ml_kem {
 }
 
 // ChaCha20-Poly1305 always carries a 128-bit tag, and WebCrypto appends it to
+// the ciphertext, the same shape as AES-GCM here; `seal_in_place_append_tag`
+// and `open_in_place` handle that placement themselves.
+// ChaCha20-Poly1305 always carries a 128-bit tag, and WebCrypto appends it to
 // the ciphertext, the same shape as AES-GCM here.
-const CHACHA20_POLY1305_TAG_LEN: usize = 16;
+fn chacha20_poly1305_key(key: &[u8]) -> Result<lc_aead::LessSafeKey, CryptoError> {
+    lc_aead::UnboundKey::new(&lc_aead::CHACHA20_POLY1305, key)
+        .map(lc_aead::LessSafeKey::new)
+        .map_err(|_| CryptoError::InvalidKey(None))
+}
+
+fn chacha20_poly1305_nonce(iv: &[u8]) -> Result<lc_aead::Nonce, CryptoError> {
+    let iv = <[u8; 12]>::try_from(iv).map_err(|_| CryptoError::InvalidData(None))?;
+    Ok(lc_aead::Nonce::assume_unique_for_key(iv))
+}
 
 pub(crate) fn chacha20_poly1305_encrypt(
     key: &[u8],
@@ -66,18 +74,16 @@ pub(crate) fn chacha20_poly1305_encrypt(
     data: &[u8],
     additional_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, CryptoError> {
-    let mut tag = vec![0u8; CHACHA20_POLY1305_TAG_LEN];
-    let mut ciphertext = openssl::symm::encrypt_aead(
-        openssl::symm::Cipher::chacha20_poly1305(),
-        key,
-        Some(iv),
-        additional_data.unwrap_or_default(),
-        data,
-        &mut tag,
-    )
-    .map_err(|_| CryptoError::EncryptionFailed(None))?;
-    ciphertext.extend_from_slice(&tag);
-    Ok(ciphertext)
+    let sealing_key = chacha20_poly1305_key(key)?;
+    let mut in_out = data.to_vec();
+    sealing_key
+        .seal_in_place_append_tag(
+            chacha20_poly1305_nonce(iv)?,
+            lc_aead::Aad::from(additional_data.unwrap_or_default()),
+            &mut in_out,
+        )
+        .map_err(|_| CryptoError::EncryptionFailed(None))?;
+    Ok(in_out)
 }
 
 pub(crate) fn chacha20_poly1305_decrypt(
@@ -86,19 +92,16 @@ pub(crate) fn chacha20_poly1305_decrypt(
     data: &[u8],
     additional_data: Option<&[u8]>,
 ) -> Result<Vec<u8>, CryptoError> {
-    if data.len() < CHACHA20_POLY1305_TAG_LEN {
-        return Err(CryptoError::DecryptionFailed(None));
-    }
-    let (ciphertext, tag) = data.split_at(data.len() - CHACHA20_POLY1305_TAG_LEN);
-    openssl::symm::decrypt_aead(
-        openssl::symm::Cipher::chacha20_poly1305(),
-        key,
-        Some(iv),
-        additional_data.unwrap_or_default(),
-        ciphertext,
-        tag,
-    )
-    .map_err(|_| CryptoError::DecryptionFailed(None))
+    let opening_key = chacha20_poly1305_key(key)?;
+    let mut in_out = data.to_vec();
+    let plaintext = opening_key
+        .open_in_place(
+            chacha20_poly1305_nonce(iv)?,
+            lc_aead::Aad::from(additional_data.unwrap_or_default()),
+            &mut in_out,
+        )
+        .map_err(|_| CryptoError::DecryptionFailed(None))?;
+    Ok(plaintext.to_vec())
 }
 
 fn ml_dsa_signing_key<P: MlDsaParameterSet>(seed: &[u8]) -> Result<SigningKey<P>, CryptoError> {
@@ -399,9 +402,12 @@ pub(crate) fn export_ml_kem_private_key_pkcs8(
 
 // Ec carries its curve so decapsulation can parse the peer point; X25519 is
 // kept apart because its shared secret needs the all-zero rejection.
-enum TraditionalPrivateKey {
-    Ec(Nid, PKey<Private>),
-    X25519(PKey<Private>),
+// The algorithm the key was built under says which curve it is, so the key
+// needs no tag of its own; only whether the all-zero rejection applies.
+struct TraditionalPrivateKey {
+    key: lc_agreement::PrivateKey,
+    algorithm: &'static lc_agreement::Algorithm,
+    is_x25519: bool,
 }
 
 struct HybridKeyPair {
@@ -413,14 +419,14 @@ struct HybridKeyPair {
 
 fn shake256(input: &[u8], output_length: usize) -> Vec<u8> {
     // SHAKE is an XOF, so the digest length is the caller's choice rather than
-    // the algorithm's.
-    let mut output = vec![0u8; output_length];
-    let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::shake_256())
-        .expect("EVP_MD_CTX allocation");
-    hasher.update(input).expect("EVP_DigestUpdate");
-    hasher
-        .finish_xof(&mut output)
-        .expect("EVP_DigestFinalXOF");
+    // the algorithm's. AWS-LC implements SHA-3 but exposes no XOF, so this one
+    // stays on a pure-Rust implementation.
+    use shake::{ExtendableOutput, Update, XofReader};
+
+    let mut output = vec![0; output_length];
+    let mut hash = shake::Shake256::default();
+    hash.update(input);
+    hash.finalize_xof().read(&mut output);
     output
 }
 
@@ -429,66 +435,40 @@ fn shake256(input: &[u8], output_length: usize) -> Vec<u8> {
 // is valid when 0 < d < n, which is the same test `SecretKey::from_slice` made
 // before this moved to OpenSSL, so derived keys are unchanged.
 fn ec_private_key_from_seed(
-    nid: Nid,
+    algorithm: &'static lc_agreement::Algorithm,
     chunk_len: usize,
     seed: &[u8],
-) -> Result<PKey<Private>, CryptoError> {
-    let group = EcGroup::from_curve_name(nid).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
-    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    let mut order = BigNum::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    group
-        .order(&mut order, &mut ctx)
-        .map_err(|_| CryptoError::OperationFailed(None))?;
-
+) -> Result<lc_agreement::PrivateKey, CryptoError> {
     for chunk in seed.chunks_exact(chunk_len) {
-        let Ok(candidate) = BigNum::from_slice(chunk) else {
-            continue;
-        };
-        if candidate.num_bits() == 0 || candidate >= order {
-            continue;
+        // AWS-LC validates the scalar, so the first chunk it accepts is the
+        // first valid one, which is the rejection sampling this needs.
+        if let Ok(key) = lc_agreement::PrivateKey::from_private_key(algorithm, chunk) {
+            return Ok(key);
         }
-        let mut point = EcPoint::new(&group).map_err(|_| CryptoError::OperationFailed(None))?;
-        if point
-            .mul_generator2(&group, &candidate, &mut ctx)
-            .is_err()
-        {
-            continue;
-        }
-        let Ok(key) = EcKey::from_private_components(&group, &candidate, &point) else {
-            continue;
-        };
-        return PKey::from_ec_key(key).map_err(|_| CryptoError::OperationFailed(None));
     }
     Err(CryptoError::OperationFailed(Some(
         "hybrid KEM traditional key rejection sampling failed".into(),
     )))
 }
 
-fn ec_public_point(key: &PKey<Private>) -> Result<Vec<u8>, CryptoError> {
-    let ec = key.ec_key().map_err(|_| CryptoError::InvalidKey(None))?;
-    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    ec.public_key()
-        .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED, &mut ctx)
+fn ec_public_point(key: &lc_agreement::PrivateKey) -> Result<Vec<u8>, CryptoError> {
+    key.compute_public_key()
+        .map(|public| public.as_ref().to_vec())
         .map_err(|_| CryptoError::OperationFailed(None))
 }
 
-fn ec_peer_key(nid: Nid, point: &[u8]) -> Result<PKey<Public>, CryptoError> {
-    let group = EcGroup::from_curve_name(nid).map_err(|_| CryptoError::UnsupportedAlgorithm)?;
-    let mut ctx = BigNumContext::new().map_err(|_| CryptoError::OperationFailed(None))?;
-    let point =
-        EcPoint::from_bytes(&group, point, &mut ctx).map_err(|_| CryptoError::InvalidKey(None))?;
-    let key = EcKey::from_public_key(&group, &point).map_err(|_| CryptoError::InvalidKey(None))?;
-    PKey::from_ec_key(key).map_err(|_| CryptoError::InvalidKey(None))
-}
-
-fn agree(private_key: &PKey<Private>, peer: &PKey<Public>) -> Result<Vec<u8>, CryptoError> {
-    let mut deriver = Deriver::new(private_key).map_err(|_| CryptoError::OperationFailed(None))?;
-    deriver
-        .set_peer(peer)
-        .map_err(|_| CryptoError::InvalidKey(None))?;
-    deriver
-        .derive_to_vec()
-        .map_err(|_| CryptoError::OperationFailed(None))
+fn agree(
+    private_key: &lc_agreement::PrivateKey,
+    algorithm: &'static lc_agreement::Algorithm,
+    peer: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let peer = lc_agreement::UnparsedPublicKey::new(algorithm, peer);
+    lc_agreement::agree(
+        private_key,
+        peer,
+        CryptoError::OperationFailed(None),
+        |secret| Ok(secret.to_vec()),
+    )
 }
 
 // RFC 7748 says to reject an all-zero X25519 secret, which is what a
@@ -500,15 +480,15 @@ fn reject_all_zero(shared: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
     Ok(shared)
 }
 
-fn x25519_key_from_seed(seed: &[u8]) -> Result<PKey<Private>, CryptoError> {
-    PKey::private_key_from_raw_bytes(seed, Id::X25519).map_err(|_| CryptoError::InvalidKey(None))
-}
-
-fn hybrid_curve(variant: HybridKemVariant) -> Option<Nid> {
+// The traditional half of each hybrid, and the width of the scalar the seed is
+// sampled into. X25519 takes its seed whole rather than by rejection.
+fn hybrid_traditional(
+    variant: HybridKemVariant,
+) -> (&'static lc_agreement::Algorithm, usize) {
     match variant {
-        HybridKemVariant::MlKem768P256 => Some(Nid::X9_62_PRIME256V1),
-        HybridKemVariant::MlKem1024P384 => Some(Nid::SECP384R1),
-        HybridKemVariant::MlKem768X25519 => None,
+        HybridKemVariant::MlKem768P256 => (&lc_agreement::ECDH_P256, 32),
+        HybridKemVariant::MlKem768X25519 => (&lc_agreement::X25519, 32),
+        HybridKemVariant::MlKem1024P384 => (&lc_agreement::ECDH_P384, 48),
     }
 }
 
@@ -528,20 +508,19 @@ fn derive_hybrid_key_pair(
     let (pq_seed, traditional_seed) = expanded.split_at(64);
     let pq_public_key = ml_kem_public_key(variant.ml_kem_variant(), pq_seed)?;
 
-    let (traditional_private_key, traditional_public_key) = match hybrid_curve(variant) {
-        Some(nid) => {
-            let chunk_len = if nid == Nid::X9_62_PRIME256V1 { 32 } else { 48 };
-            let private_key = ec_private_key_from_seed(nid, chunk_len, traditional_seed)?;
-            let public_key = ec_public_point(&private_key)?;
-            (TraditionalPrivateKey::Ec(nid, private_key), public_key)
-        },
-        None => {
-            let private_key = x25519_key_from_seed(traditional_seed)?;
-            let public_key = private_key
-                .raw_public_key()
-                .map_err(|_| CryptoError::OperationFailed(None))?;
-            (TraditionalPrivateKey::X25519(private_key), public_key)
-        },
+    let (algorithm, chunk_len) = hybrid_traditional(variant);
+    let is_x25519 = matches!(variant, HybridKemVariant::MlKem768X25519);
+    let private_key = if is_x25519 {
+        lc_agreement::PrivateKey::from_private_key(algorithm, traditional_seed)
+            .map_err(|_| CryptoError::OperationFailed(None))?
+    } else {
+        ec_private_key_from_seed(algorithm, chunk_len, traditional_seed)?
+    };
+    let traditional_public_key = ec_public_point(&private_key)?;
+    let traditional_private_key = TraditionalPrivateKey {
+        key: private_key,
+        algorithm,
+        is_x25519,
     };
 
     let mut public_key = pq_public_key;
@@ -578,60 +557,46 @@ fn hybrid_kem_combiner(
     input.extend_from_slice(traditional_ciphertext);
     input.extend_from_slice(traditional_public_key);
     input.extend_from_slice(label);
-    openssl::hash::hash(openssl::hash::MessageDigest::sha3_256(), &input)
-        .expect("SHA3-256 over an in-memory buffer")
-        .to_vec()
+    lc_digest::digest(&lc_digest::SHA3_256, &input).as_ref().to_vec()
 }
 
 fn traditional_encapsulate(
     variant: HybridKemVariant,
     public_key: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
-    match hybrid_curve(variant) {
-        Some(nid) => {
-            let recipient = ec_peer_key(nid, public_key)?;
-            let (chunk_len, seed_len) = if nid == Nid::X9_62_PRIME256V1 {
-                (32, 128)
-            } else {
-                (48, 48)
-            };
-            let ephemeral = ec_private_key_from_seed(
-                nid,
-                chunk_len,
-                &crate::crypto::random_byte_array(seed_len),
-            )?;
-            let ciphertext = ec_public_point(&ephemeral)?;
-            let shared_key = agree(&ephemeral, &recipient)?;
-            Ok((ciphertext, shared_key))
-        },
-        None => {
-            let recipient = PKey::public_key_from_raw_bytes(public_key, Id::X25519)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-            let ephemeral = x25519_key_from_seed(&crate::crypto::random_byte_array(32))?;
-            let ciphertext = ephemeral
-                .raw_public_key()
-                .map_err(|_| CryptoError::OperationFailed(None))?;
-            let shared_key = reject_all_zero(agree(&ephemeral, &recipient)?)?;
-            Ok((ciphertext, shared_key))
-        },
-    }
+    let (algorithm, chunk_len) = hybrid_traditional(variant);
+    let is_x25519 = matches!(variant, HybridKemVariant::MlKem768X25519);
+    let ephemeral = if is_x25519 {
+        lc_agreement::PrivateKey::generate(algorithm)
+            .map_err(|_| CryptoError::OperationFailed(None))?
+    } else {
+        // The seed is drawn wide so rejection sampling has several chunks to
+        // try before giving up.
+        ec_private_key_from_seed(
+            algorithm,
+            chunk_len,
+            &crate::crypto::random_byte_array(chunk_len * 4),
+        )?
+    };
+    let ciphertext = ec_public_point(&ephemeral)?;
+    let shared_key = agree(&ephemeral, algorithm, public_key)?;
+    let shared_key = if is_x25519 {
+        reject_all_zero(shared_key)?
+    } else {
+        shared_key
+    };
+    Ok((ciphertext, shared_key))
 }
 
 fn traditional_decapsulate(
     private_key: &TraditionalPrivateKey,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    match private_key {
-        TraditionalPrivateKey::Ec(nid, private_key) => {
-            let peer = ec_peer_key(*nid, ciphertext)
-                .map_err(|_| CryptoError::OperationFailed(None))?;
-            agree(private_key, &peer)
-        },
-        TraditionalPrivateKey::X25519(private_key) => {
-            let peer = PKey::public_key_from_raw_bytes(ciphertext, Id::X25519)
-                .map_err(|_| CryptoError::OperationFailed(None))?;
-            reject_all_zero(agree(private_key, &peer)?)
-        },
+    let shared = agree(&private_key.key, private_key.algorithm, ciphertext)?;
+    if private_key.is_x25519 {
+        reject_all_zero(shared)
+    } else {
+        Ok(shared)
     }
 }
 
@@ -661,15 +626,10 @@ pub(crate) fn import_hybrid_kem_public_key(
     let pq_public_key = import_ml_kem_public_key(variant.ml_kem_variant(), pq_public_key, false)?;
     // Parsing is the validation: an EC point has to be on the curve, and an
     // X25519 point has to be the right length.
-    match hybrid_curve(variant) {
-        Some(nid) => {
-            ec_peer_key(nid, traditional_public_key)?;
-        },
-        None => {
-            PKey::public_key_from_raw_bytes(traditional_public_key, Id::X25519)
-                .map_err(|_| CryptoError::InvalidKey(None))?;
-        },
-    }
+    let (algorithm, _) = hybrid_traditional(variant);
+    let peer = lc_agreement::UnparsedPublicKey::new(algorithm, traditional_public_key);
+    let _: lc_agreement::ParsedPublicKey =
+        peer.try_into().map_err(|_| CryptoError::InvalidKey(None))?;
     let mut normalized = pq_public_key;
     normalized.extend_from_slice(traditional_public_key);
     Ok(normalized)

@@ -2224,14 +2224,25 @@ fn validate_okp_jwk_key_pair<'js>(
     public_key: &[u8],
     is_ed25519: bool,
 ) -> Result<()> {
-    let id = if is_ed25519 {
-        openssl::pkey::Id::ED25519
+    // Ed25519 carries the point on the key pair; X25519 derives it through the
+    // agreement side, which is where its keys live.
+    let derived_public_key = if is_ed25519 {
+        aws_lc_rs::signature::Ed25519KeyPair::from_seed_unchecked(private_key)
+            .map(|key| {
+                use aws_lc_rs::signature::KeyPair as _;
+                key.public_key().as_ref().to_vec()
+            })
+            .or_throw_data_error(ctx)?
     } else {
-        openssl::pkey::Id::X25519
+        aws_lc_rs::agreement::PrivateKey::from_private_key(
+            &aws_lc_rs::agreement::X25519,
+            private_key,
+        )
+        .or_throw_data_error(ctx)?
+        .compute_public_key()
+        .map(|public| public.as_ref().to_vec())
+        .or_throw_data_error(ctx)?
     };
-    let derived_public_key = openssl::pkey::PKey::private_key_from_raw_bytes(private_key, id)
-        .and_then(|key| key.raw_public_key())
-        .or_throw_data_error(ctx)?;
     if derived_public_key.as_slice() != public_key {
         return Err(DOMException::data_error(ctx, "JWK key pair is invalid"));
     }
