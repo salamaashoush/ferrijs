@@ -192,12 +192,31 @@ fn assert_user_and_network(value: &serde_json::Value) {
   );
   assert!(value["priority"].as_i64().is_some(), "getPriority: {value:?}");
 
-  // Every host has a loopback interface, and Node marks it internal.
   let interfaces = value["interfaces"].as_object().expect("networkInterfaces object");
-  let loopback = interfaces
+  let entries: Vec<serde_json::Value> = interfaces
     .values()
     .flat_map(|entries| entries.as_array().cloned().unwrap_or_default())
-    .find(|entry| entry["address"] == "127.0.0.1");
+    .collect();
+  assert!(!entries.is_empty(), "no interfaces in {interfaces:?}");
+
+  // Every host has a loopback, and Node marks it internal. `sysinfo` does not
+  // enumerate Windows' loopback pseudo-interface, so it is absent there and
+  // this runtime differs from Node on that one entry; the shape of whatever
+  // interfaces it does report is still checked.
+  let loopback = entries.iter().find(|entry| entry["address"] == "127.0.0.1");
+  if cfg!(target_os = "windows") && loopback.is_none() {
+    for entry in &entries {
+      assert!(
+        entry["cidr"].as_str().is_some_and(|c| c.contains('/')),
+        "interface cidr: {entry:?}"
+      );
+      assert!(
+        matches!(entry["family"].as_str(), Some("IPv4" | "IPv6")),
+        "family: {entry:?}"
+      );
+    }
+    return;
+  }
   let loopback = loopback.unwrap_or_else(|| panic!("no loopback interface in {interfaces:?}"));
   assert_eq!(loopback["family"], "IPv4");
   assert_eq!(loopback["internal"], serde_json::Value::Bool(true));
