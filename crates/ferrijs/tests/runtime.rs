@@ -863,8 +863,7 @@ async fn the_script_cache_can_be_turned_off() {
 
 #[tokio::test]
 async fn the_script_cache_stays_within_its_bound() {
-  // Two slots, four distinct scripts: the table is emptied rather than
-  // grown, and every script still answers correctly.
+  // Two slots, four distinct scripts: eviction must preserve results.
   let rt = Runtime::builder().script_cache(2).build().await.expect("runtime");
   for round in 0..3 {
     for i in 0..4 {

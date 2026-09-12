@@ -351,6 +351,101 @@ fn sustained(c: &mut Criterion) {
   g.finish();
 }
 
+fn script_working_set(c: &mut Criterion) {
+  let rt = tokio_rt();
+  let mut g = c.benchmark_group("script_working_set");
+  for slots in [0, 32] {
+    let realm = leak(rt.block_on(async { Runtime::builder().script_cache(slots).build().await.unwrap() }));
+    let hot = leak(format!("{}\nreturn args[0] + 1", "void 0;\n".repeat(512)));
+    let mut sequence = 0u64;
+    g.bench_function(format!("hot_with_cold_cache_{slots}"), |b| {
+      b.to_async(&rt).iter_custom(|iters| {
+        let first = sequence;
+        sequence += iters;
+        hosted(iters, {
+          let mut index = first;
+          move || {
+            let cold = format!("return {index}");
+            index += 1;
+            async move {
+              assert_eq!(ok(realm.eval_script(hot, &[1.into()], RunOptions::default()).await), 2);
+              ok(realm.eval_script(&cold, &[], RunOptions::default()).await)
+            }
+          }
+        })
+      });
+    });
+  }
+  g.finish();
+}
+
+fn stored_handlers(c: &mut Criterion) {
+  use ferrijs::{ConsoleEntry, ConsoleOptions, ConsoleSink};
+  use std::sync::Arc;
+
+  #[derive(Debug)]
+  struct Sink;
+  impl ConsoleSink for Sink {
+    fn emit(&self, entry: &ConsoleEntry) {
+      black_box(entry);
+    }
+  }
+
+  let rt = tokio_rt();
+  let realm = leak(rt.block_on(async {
+    let realm = Runtime::builder()
+      .console(ConsoleOptions {
+        sink: Some(Arc::new(Sink)),
+        ..ConsoleOptions::default()
+      })
+      .build()
+      .await
+      .unwrap();
+    ok(
+      realm
+        .eval_script(
+          "globalThis.handleSync = request => ({ status: 200, body: { id: request.id, ok: true } });
+       globalThis.handleAsync = async request => { await Promise.resolve(); return handleSync(request); };",
+          &[],
+          RunOptions::default(),
+        )
+        .await,
+    );
+    realm
+  }));
+  let request = leak(serde_json::json!({ "id": 42, "method": "GET", "path": "/items/42" }));
+  let expected = leak(serde_json::json!({ "status": 200, "body": { "id": 42, "ok": true } }));
+  let mut g = c.benchmark_group("stored_handlers");
+  for name in ["handleSync", "handleAsync"] {
+    g.bench_function(name, |b| {
+      b.to_async(&rt).iter_custom(|iters| {
+        hosted(iters, move || async move {
+          let result = realm
+            .run(
+              RunOptions::default(),
+              Box::new(move |ctx| {
+                Box::pin(async move {
+                  let handler: rquickjs::Function<'_> = ctx.globals().get(name).unwrap();
+                  let request = ferrijs::value::json_to_js(&ctx, request).unwrap();
+                  let value: rquickjs::Value<'_> = handler.call((request,)).unwrap();
+                  let value = if let Some(promise) = value.as_promise() {
+                    promise.clone().into_future::<rquickjs::Value<'_>>().await.unwrap()
+                  } else {
+                    value
+                  };
+                  Ok(ferrijs::value::value_to_json(&ctx, value).unwrap())
+                })
+              }),
+            )
+            .await;
+          assert_eq!(&ok(result), expected);
+        })
+      });
+    });
+  }
+  g.finish();
+}
+
 criterion_group!(
   benches,
   startup,
@@ -359,6 +454,8 @@ criterion_group!(
   console,
   modules,
   registry,
-  sustained
+  sustained,
+  script_working_set,
+  stored_handlers
 );
 criterion_main!(benches);

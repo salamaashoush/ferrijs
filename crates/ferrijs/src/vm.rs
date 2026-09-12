@@ -25,11 +25,16 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 
 use rquickjs::{AsyncContext, Ctx};
 use tracing::Instrument;
 
 use crate::error::ScriptError;
+
+pub const DEFAULT_VM_CAPACITY: usize = 1024;
 
 /// A unit of work executed inside the session's VM event loop. The
 /// closure runs under the runtime lock on the loop's execution context;
@@ -40,30 +45,90 @@ pub type VmJob = Box<dyn for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output 
 #[derive(Clone)]
 pub struct VmHandle {
   tx: tokio::sync::mpsc::UnboundedSender<VmJob>,
+  admission: Arc<AtomicUsize>,
+}
+
+struct VmPermit(Arc<AtomicUsize>);
+
+impl Drop for VmPermit {
+  fn drop(&mut self) {
+    self.0.fetch_add(1, Ordering::Relaxed);
+  }
+}
+
+pub(crate) struct VmReservation<'a> {
+  handle: &'a VmHandle,
+  permit: VmPermit,
 }
 
 impl VmHandle {
   /// Run `f` inside the VM event loop and await its result.
   ///
-  /// Errors only when the loop is gone (session VM discarded): the job
-  /// could not be submitted, or the loop dropped it before completion.
+  /// Errors when capacity is exhausted or the loop is gone. Dropping
+  /// the caller cancels its job on the VM owner at the next yield.
   pub async fn with<R, F>(&self, f: F) -> Result<R, ScriptError>
   where
     R: Send + 'static,
     F: for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output = R> + Send + 'js>> + Send + 'static,
   {
-    let (tx, rx) = tokio::sync::oneshot::channel::<R>();
+    self.reserve()?.with(f).await
+  }
+
+  pub(crate) fn reserve(&self) -> Result<VmReservation<'_>, ScriptError> {
+    // Waiting for capacity here can deadlock a browser callback behind
+    // the script that is awaiting that callback.
+    self
+      .admission
+      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+        available.checked_sub(1)
+      })
+      .map_err(|_| ScriptError::internal("VM job capacity exhausted"))?;
+    let permit = VmPermit(Arc::clone(&self.admission));
+    Ok(VmReservation { handle: self, permit })
+  }
+}
+
+impl VmReservation<'_> {
+  pub(crate) async fn with<R, F>(self, f: F) -> Result<R, ScriptError>
+  where
+    R: Send + 'static,
+    F: for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output = R> + Send + 'js>> + Send + 'static,
+  {
+    let permit = self.permit;
+    let (mut tx, rx) = tokio::sync::oneshot::channel::<R>();
     let span = tracing::Span::current();
     let job: VmJob = Box::new(move |ctx| {
       Box::pin(
         async move {
-          let r = f(ctx).await;
-          let _ = tx.send(r);
+          let permit = permit;
+          if tx.is_closed() {
+            return;
+          }
+          let mut future = f(ctx);
+          let result = std::future::poll_fn(|cx| {
+            if tx.is_closed() {
+              return Poll::Ready(None);
+            }
+            if let Poll::Ready(result) = future.as_mut().poll(cx) {
+              return Poll::Ready(Some(result));
+            }
+            // Only parked jobs need a cancellation waker; synchronous
+            // dispatch avoids registering and removing one per call.
+            tx.poll_closed(cx).map(|()| None)
+          })
+          .await;
+          drop(future);
+          // A reply may immediately submit another job on another thread.
+          drop(permit);
+          if let Some(result) = result {
+            let _ = tx.send(result);
+          }
         }
         .instrument(span),
       )
     });
     self
+      .handle
       .tx
       .send(job)
       .map_err(|_| ScriptError::internal("session VM loop is gone".to_string()))?;
@@ -88,6 +153,10 @@ pub struct VmShutdown {
 /// runtime alive) and is the only future that ever polls the runtime's
 /// schedular.
 pub fn spawn_vm_loop(ctx: &AsyncContext) -> (VmHandle, VmShutdown) {
+  spawn_vm_loop_with_capacity(ctx, DEFAULT_VM_CAPACITY)
+}
+
+pub(crate) fn spawn_vm_loop_with_capacity(ctx: &AsyncContext, capacity: usize) -> (VmHandle, VmShutdown) {
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<VmJob>();
   let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
   let loop_ctx = ctx.clone();
@@ -106,7 +175,13 @@ pub fn spawn_vm_loop(ctx: &AsyncContext) -> (VmHandle, VmShutdown) {
       })
       .await;
   });
-  (VmHandle { tx }, VmShutdown { _tx: shutdown_tx })
+  (
+    VmHandle {
+      tx,
+      admission: Arc::new(AtomicUsize::new(capacity)),
+    },
+    VmShutdown { _tx: shutdown_tx },
+  )
 }
 
 /// [`VmHandle::with`] with `async_with!` ergonomics: the body runs on

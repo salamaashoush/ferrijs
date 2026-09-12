@@ -32,7 +32,7 @@ use crate::realm::RealmOptions;
 use crate::redact::Redactor;
 use crate::result::ConsoleEntry;
 use crate::source_map::{CompiledModule, SourceMapper};
-use crate::vm::{VmHandle, VmShutdown, spawn_vm_loop};
+use crate::vm::{VmHandle, VmShutdown, spawn_vm_loop_with_capacity};
 use crate::vm_with;
 
 /// Default console-capture limits.
@@ -110,6 +110,8 @@ pub struct Config {
   /// [`Runtime::eval_script`] is not re-parsed. Zero turns it off. See
   /// [`crate::script_cache`].
   pub script_cache: usize,
+  /// Maximum queued and running host jobs, including callback dispatch.
+  pub vm_capacity: usize,
   /// What `fetch` sends through. `None` installs no `fetch` at all; the
   /// default is the standalone [`crate::fetch::Client`].
   #[cfg(feature = "fetch")]
@@ -130,6 +132,7 @@ impl std::fmt::Debug for Config {
       .field("fs_global", &self.fs_global)
       .field("timers", &self.timers)
       .field("script_cache", &self.script_cache)
+      .field("vm_capacity", &self.vm_capacity)
       .field(
         "extensions",
         &self.extensions.iter().map(|e| e.name().to_string()).collect::<Vec<_>>(),
@@ -160,6 +163,7 @@ impl Default for Builder {
         fs_global: false,
         timers: true,
         script_cache: crate::script_cache::DEFAULT_SCRIPT_CACHE,
+        vm_capacity: crate::vm::DEFAULT_VM_CAPACITY,
         #[cfg(feature = "fetch")]
         fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
@@ -252,6 +256,15 @@ impl Builder {
   #[must_use]
   pub fn script_cache(mut self, entries: usize) -> Self {
     self.config.script_cache = entries;
+    self
+  }
+
+  /// Limit queued plus active host jobs. Full realms reject submissions
+  /// immediately, including reentrant callbacks, rather than deadlocking
+  /// while waiting for work that needs the same realm. Defaults to 1024.
+  #[must_use]
+  pub fn vm_capacity(mut self, jobs: usize) -> Self {
+    self.config.vm_capacity = jobs;
     self
   }
 
@@ -415,6 +428,31 @@ pub struct Runtime {
   console_slot: Arc<ConsoleSlot>,
 }
 
+struct RunGuard<'a> {
+  runtime: &'a Runtime,
+  token: Option<crate::limits::ArmToken>,
+}
+
+impl RunGuard<'_> {
+  fn disarm(&mut self) {
+    if let Some(token) = self.token.take() {
+      self.runtime.timeout.disarm(token);
+    }
+  }
+}
+
+impl Drop for RunGuard<'_> {
+  fn drop(&mut self) {
+    if self.token.is_some() {
+      // A dropped Rust future does not revoke JS continuations already
+      // scheduled by the body. They must never resume an abandoned run.
+      self.runtime.poisoned.store(true, Ordering::Relaxed);
+      self.runtime.timeout.cancelled.store(true, Ordering::Relaxed);
+      self.disarm();
+    }
+  }
+}
+
 impl std::fmt::Debug for Runtime {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Runtime")
@@ -431,6 +469,9 @@ impl Runtime {
   }
 
   async fn create(config: Config) -> Result<Self, ScriptError> {
+    if config.vm_capacity == 0 {
+      return Err(ScriptError::internal("VM capacity must be positive"));
+    }
     let runtime = AsyncRuntime::new_with_alloc(crate::alloc::MiAllocator)
       .map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
 
@@ -498,7 +539,7 @@ impl Runtime {
       .await
       .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
 
-    let (vm, vm_shutdown) = spawn_vm_loop(&ctx);
+    let (vm, vm_shutdown) = spawn_vm_loop_with_capacity(&ctx, config.vm_capacity);
 
     let base_console = Arc::new(Self::console_capture(&config));
     let install_console_capture = Arc::clone(&base_console);
@@ -701,39 +742,48 @@ impl Runtime {
     if self.poisoned() {
       return Run {
         result: Err(ScriptError::internal(
-          "this realm is poisoned by an earlier timeout or allocation fault; build a new one",
+          "this realm is poisoned by an earlier cancellation, timeout or allocation fault; build a new one",
         )),
         duration_ms: 0,
         console: Vec::new(),
         poisoned: true,
       };
     }
+    let reservation = match self.vm.reserve() {
+      Ok(reservation) => reservation,
+      Err(error) => return self.finish(Err(error), started, &console, self.config.limits.timeout),
+    };
     let timeout = self.apply_run_options(&options).await;
     let token = self.timeout.arm(started + timeout);
+    let mut guard = RunGuard {
+      runtime: self,
+      token: Some(token),
+    };
     if !streaming {
       self.console_slot.retarget(Arc::clone(&console));
     }
 
-    let fut = vm_with!(self.vm => |ctx| { body(ctx).await });
+    let fut = vm_with!(reservation => |ctx| { body(ctx).await });
 
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
-    let outcome = match run_within(self.timeout.clock(), backstop, fut).await {
-      Ok(r) => r.and_then(|inner| inner),
-      Err(_) => return self.finish_backstop(token, started, &console, timeout),
+    let outcome = if let Ok(r) = run_within(self.timeout.clock(), backstop, fut).await {
+      r.and_then(|inner| inner)
+    } else {
+      guard.disarm();
+      return self.finish_backstop(started, &console, timeout);
     };
-    self.finish(token, outcome, started, &console, timeout)
+    guard.disarm();
+    self.finish(outcome, started, &console, timeout)
   }
 
   /// Build the `Run` from an outcome, applying the poison rule.
   fn finish<T>(
     &self,
-    token: crate::limits::ArmToken,
     outcome: Result<T, ScriptError>,
     started: Instant,
     console: &ConsoleCapture,
     timeout: Duration,
   ) -> Run<T> {
-    self.timeout.disarm(token);
     let duration_ms = elapsed_ms(started);
     let drained = console.drain();
     match outcome {
@@ -773,14 +823,7 @@ impl Runtime {
   /// chance to halt it. The future was dropped mid-flight, so by default
   /// the realm is poisoned -- see [`crate::Limits::backstop_poisons`]
   /// for the host that chooses otherwise.
-  fn finish_backstop<T>(
-    &self,
-    token: crate::limits::ArmToken,
-    started: Instant,
-    console: &ConsoleCapture,
-    timeout: Duration,
-  ) -> Run<T> {
-    self.timeout.disarm(token);
+  fn finish_backstop<T>(&self, started: Instant, console: &ConsoleCapture, timeout: Duration) -> Run<T> {
     let poisoned = self.config.limits.backstop_poisons;
     if poisoned {
       self.poisoned.store(true, Ordering::Relaxed);

@@ -23,7 +23,7 @@
 //! a host something it must remember to drop before the realm would be
 //! an abort waiting to happen.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 
 use rquickjs::{Ctx, Function, Persistent};
@@ -33,10 +33,8 @@ use rustc_hash::FxHashMap;
 ///
 /// A host running one script in a loop needs one slot; the rest are for
 /// a handful of distinct bodies (a poll, a predicate, a serializer).
-/// Past the limit the table is emptied rather than evicted one at a
-/// time: a workload that rotates through more scripts than this has no
-/// working set to protect, and clearing keeps the bound exact and the
-/// code honest.
+/// At the limit the least recently used script gives up its slot, so
+/// occasional new scripts do not discard a host's polling functions.
 pub const DEFAULT_SCRIPT_CACHE: usize = 32;
 
 struct Entry {
@@ -45,12 +43,14 @@ struct Entry {
   /// trade-off worth making for a pointer's worth of memory.
   source: Box<str>,
   function: Persistent<Function<'static>>,
+  used: Cell<u64>,
 }
 
 /// The realm's compiled-script table.
 pub struct ScriptCache {
   limit: usize,
   entries: FxHashMap<u64, Entry>,
+  clock: Cell<u64>,
 }
 
 /// The table as realm userdata.
@@ -79,6 +79,7 @@ pub fn install(ctx: &Ctx<'_>, limit: usize) {
   let _ = ctx.store_userdata(ScriptCacheUd(RefCell::new(ScriptCache {
     limit,
     entries: FxHashMap::default(),
+    clock: Cell::new(0),
   })));
 }
 
@@ -90,6 +91,9 @@ pub fn get<'js>(ctx: &Ctx<'js>, source: &str) -> Option<Function<'js>> {
   if &*entry.source != source {
     return None;
   }
+  let used = cache.clock.get().saturating_add(1);
+  cache.clock.set(used);
+  entry.used.set(used);
   entry.function.clone().restore(ctx).ok()
 }
 
@@ -101,14 +105,47 @@ pub fn put<'js>(ctx: &Ctx<'js>, source: &str, function: &Function<'js>) {
   let Ok(mut cache) = ud.0.try_borrow_mut() else {
     return;
   };
-  if cache.entries.len() >= cache.limit {
-    cache.entries.clear();
+  let hash = hash_of(source);
+  if cache.entries.len() >= cache.limit
+    && !cache.entries.contains_key(&hash)
+    && let Some(oldest) = cache
+      .entries
+      .iter()
+      .min_by_key(|(_, entry)| entry.used.get())
+      .map(|(key, _)| *key)
+  {
+    cache.entries.remove(&oldest);
   }
+  let used = cache.clock.get().saturating_add(1);
+  cache.clock.set(used);
   cache.entries.insert(
-    hash_of(source),
+    hash,
     Entry {
       source: source.into(),
       function: Persistent::save(ctx, function.clone()),
+      used: Cell::new(used),
     },
   );
+}
+
+#[cfg(test)]
+mod tests {
+  use crate::{RunOptions, Runtime};
+
+  #[tokio::test]
+  async fn cold_scripts_do_not_evict_a_recently_used_script() -> Result<(), Box<dyn std::error::Error>> {
+    let rt = Runtime::builder().script_cache(2).build().await?;
+    for source in ["return 1", "return 2", "return 1", "return 3"] {
+      rt.eval_script(source, &[], RunOptions::default()).await.result?;
+    }
+    rt.with(|ctx| {
+      Box::pin(async move {
+        assert!(super::get(&ctx, "return 1").is_some());
+        assert!(super::get(&ctx, "return 2").is_none());
+        assert!(super::get(&ctx, "return 3").is_some());
+      })
+    })
+    .await?;
+    Ok(())
+  }
 }

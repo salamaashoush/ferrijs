@@ -157,6 +157,7 @@ pub(crate) struct TimeoutState {
   /// Set by the interrupt handler when it force-halted the interpreter.
   /// Never cleared: the realm is poisoned from then on.
   pub timed_out: AtomicBool,
+  pub cancelled: AtomicBool,
   clock: Arc<dyn PauseClock>,
   /// [`PauseClock::never_parks`], read once: it cannot change, and the
   /// interrupt handler consults it on every check.
@@ -181,6 +182,7 @@ impl TimeoutState {
       armed: std::sync::Mutex::new(Vec::new()),
       next_token: AtomicU64::new(1),
       timed_out: AtomicBool::new(false),
+      cancelled: AtomicBool::new(false),
       never_parks: clock.never_parks(),
       clock,
     }
@@ -239,6 +241,9 @@ impl TimeoutState {
   /// path (one atomic load); the parked-time correction only runs when a
   /// deadline looks due.
   pub fn expired(&self) -> bool {
+    if self.cancelled.load(Ordering::Relaxed) {
+      return true;
+    }
     let earliest = self.earliest_ms.load(Ordering::Relaxed);
     if earliest == Self::DISARMED {
       return false;

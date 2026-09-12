@@ -110,6 +110,22 @@ budget per run enforced by the interrupt handler, with a backstop for a
 run parked on a native await. A poisoned realm refuses every later run;
 the host builds a new one.
 
+Dropping an armed `Runtime::run` also poisons the realm and requests a
+QuickJS interrupt. JavaScript continuations can outlive the Rust future
+that awaited them, so the host must replace a cancelled realm. Dropping
+a raw `VmHandle::with` caller cancels its queued or parked job on the VM
+owner; it does not revoke JavaScript work or native side effects already
+started. Raw VM access remains a trusted host interface.
+
+`Builder::vm_capacity` bounds queued plus active host jobs (1024 by
+default). Excess submissions fail immediately with `VM job capacity
+exhausted`, before changing run limits or console capture. Waiting for
+capacity could deadlock a callback behind the run awaiting it. Hosts
+must leave capacity for callbacks and handle overload errors. This is a
+job count, not a byte budget: captured request bodies, native buffers,
+JavaScript promises and tasks spawned directly through `Ctx::spawn`
+need their own limits.
+
 `RealmOptions` shapes the language:
 
 - `eval: false` replaces `eval`, `Function` and the async and generator
