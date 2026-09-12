@@ -565,3 +565,11 @@ the extension that needs it.
 
     On re-sync: keep OUR provider. Do not take upstream's RustCrypto one
     back.
+
+38. **`fs/open.rs` and `fs/guard.rs` — read/write handles need both grants.**
+    Every `+` flag checks read and write before opening, including append
+    and exclusive creation. Combined access modes check each grant.
+    Append/read creates missing files, and the
+    exclusive flag aliases share their canonical flags' behavior. Open
+    failures retain Node's `code`, `errno`, `syscall`, and `path` through
+    `node::system_error`.

@@ -38,15 +38,16 @@ pub(super) fn access_sync_guarded(ctx: Ctx<'_>, path: String, mode: Opt<u32>) ->
     access_sync(ctx, path, mode)
 }
 
-/// `W_OK` asks whether the file can be written, which is a write
-/// question; everything else is a read.
 fn check_access_mode(ctx: &Ctx<'_>, path: &str, mode: Option<u32>) -> Result<()> {
     let path = Path::new(path);
-    if mode.is_some_and(|m| m & super::CONSTANT_W_OK != 0) {
-        check_write(ctx, path)
-    } else {
-        check_read(ctx, path)
+    let mode = mode.unwrap_or(super::CONSTANT_F_OK);
+    if mode & super::CONSTANT_W_OK != 0 {
+        check_write(ctx, path)?;
     }
+    if mode & (super::CONSTANT_R_OK | super::CONSTANT_X_OK) != 0 || mode & super::CONSTANT_W_OK == 0 {
+        check_read(ctx, path)?;
+    }
+    Ok(())
 }
 
 pub(super) async fn chmod_guarded(ctx: Ctx<'_>, path: String, mode: u32) -> Result<()> {
@@ -97,15 +98,15 @@ pub(super) async fn open_guarded(
     open(ctx, path, flags, mode).await
 }
 
-/// Node's flag strings: anything but a plain `r` can write, and `r+`
-/// reads too. A flag the vendored `open` will reject is checked as a
+/// Every read/write flag needs both grants before a handle can escape.
+/// A flag the vendored `open` will reject is checked as a
 /// write, so the refusal (if any) is the sandbox's rather than a
 /// filesystem error that reveals the file exists.
 fn check_open_flags(ctx: &Ctx<'_>, path: &str, flags: Option<&str>) -> Result<()> {
     let path = Path::new(path);
     match flags.unwrap_or("r") {
-        "r" => check_read(ctx, path),
-        "r+" | "rs+" => {
+        "r" | "rs" | "sr" => check_read(ctx, path),
+        "r+" | "rs+" | "sr+" | "w+" | "wx+" | "xw+" | "a+" | "ax+" | "xa+" | "as+" | "sa+" => {
             check_read(ctx, path)?;
             check_write(ctx, path)
         }

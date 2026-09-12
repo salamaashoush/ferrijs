@@ -5,6 +5,7 @@ use rquickjs::{Ctx, Exception, Result};
 pub fn throw(ctx: &Ctx<'_>, error: &io::Error, syscall: &str, path: &str) -> rquickjs::Error {
   let code = match error.raw_os_error() {
     Some(libc::ENOENT) => "ENOENT",
+    _ if error.kind() == io::ErrorKind::AlreadyExists => "EEXIST",
     Some(libc::ENOTDIR) => "ENOTDIR",
     Some(libc::EISDIR) => "EISDIR",
     Some(libc::EACCES) => "EACCES",
