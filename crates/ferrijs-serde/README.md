@@ -42,6 +42,10 @@ nightly-only); pedantic clippy is off for the same reason.
    when serializing structs and convert them to native JS numbers.
    Ordinary maps with the same key remain objects.
 
+5. `de.rs`: proxy array lengths use JavaScript numeric coercion and
+   `ToLength` clamping. Primitive lengths no longer panic in Rust, and
+   object coercion preserves the `valueOf` receiver.
+
 ## Re-syncing
 
 ```

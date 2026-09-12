@@ -2,7 +2,7 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use rquickjs::{
-    Exception, Filter, Function, Null, Object, String as JSString, Value,
+    Coerced, Exception, Filter, FromJs, Function, Null, Object, String as JSString, Value,
     atom::PredefinedAtom,
     function::This,
     object::ObjectIter,
@@ -475,16 +475,12 @@ impl<'a, 'de: 'a> SeqAccess<'a, 'de> {
         // it's fine to return any value, not just a number from the
         // `length` property.
         let value: Value = seq.get(PredefinedAtom::Length).map_err(Error::new)?;
-        let length: usize = if let Some(n) = value.as_number() {
-            n as usize
+        let length = if let Some(n) = value.as_number() {
+            n
         } else {
-            let value_of: Function = value
-                .as_object()
-                .expect("length to be an object")
-                .get(PredefinedAtom::ValueOf)
-                .map_err(Error::new)?;
-            value_of.call(()).map_err(Error::new)?
+            Coerced::<f64>::from_js(seq.ctx(), value).map_err(Error::new)?.0
         };
+        let length = length.max(0.0).min(MAX_SAFE_INTEGER as f64) as usize;
 
         Ok(Self {
             de,
