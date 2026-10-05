@@ -228,6 +228,7 @@ fn console(c: &mut Criterion) {
 /// Module loading: what `require` and `import` of a native module cost,
 /// and what a module evaluation costs over a plain script.
 fn modules(c: &mut Criterion) {
+  const MODULES_PER_REALM: u64 = 1024;
   let rt = tokio_rt();
   let realm: &'static Runtime = leak(rt.block_on(granted()));
   let mut g = c.benchmark_group("modules");
@@ -254,12 +255,13 @@ fn modules(c: &mut Criterion) {
 
   // Every `Module::declare` appends to the context's module list and
   // QuickJS frees it only with the context, so a realm that evaluates
-  // enough of them exhausts its heap. These cases therefore get a realm
-  // of their own and a small sample; sharing the group's realm let one
-  // of them poison it, after which the other was timing the poisoned
-  // fast path rather than a module evaluation.
-  g.sample_size(10);
-  g.measurement_time(std::time::Duration::from_secs(3));
+  // enough of them exhausts its heap. These cases therefore build a fresh
+  // realm every `MODULES_PER_REALM` evaluations, outside the timed loop.
+  // A small sample was not enough: Criterion's warm-up runs for its full
+  // time whatever the sample size, and ran the realm out of memory.
+  // Sharing the group's realm let one case poison it, after which the
+  // other was timing the poisoned fast path rather than a module
+  // evaluation.
   for (name, source) in [
     ("eval_module_source", "const x = 1 + 1; export default x;"),
     (
@@ -267,12 +269,21 @@ fn modules(c: &mut Criterion) {
       "import { join } from 'node:path'; export default join('a', 'b');",
     ),
   ] {
-    let fresh: &'static Runtime = leak(rt.block_on(granted()));
     g.bench_function(name, |b| {
-      b.to_async(&rt).iter_custom(|iters| {
-        hosted(iters, move || async move {
-          ok(fresh.eval_module_source(name, source, &[], RunOptions::default()).await)
-        })
+      b.to_async(&rt).iter_custom(|iters| async move {
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut left = iters;
+        while left > 0 {
+          let chunk = left.min(MODULES_PER_REALM);
+          let fresh = std::sync::Arc::new(granted().await);
+          elapsed += hosted(chunk, move || {
+            let fresh = std::sync::Arc::clone(&fresh);
+            async move { ok(fresh.eval_module_source(name, source, &[], RunOptions::default()).await) }
+          })
+          .await;
+          left -= chunk;
+        }
+        elapsed
       });
     });
   }
