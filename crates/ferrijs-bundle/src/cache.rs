@@ -12,12 +12,11 @@
 //! produced by an identical `QuickJS` build with native endianness. A
 //! disk cache crosses process (and machine) boundaries, so every entry
 //! lives under an [`abi_tag`]-named directory folding the `QuickJS`
-//! version (which tracks the on-disk `BC_VERSION`), target arch,
-//! endianness, and pointer width. Bytecode is only ever loaded from the
-//! directory matching the running toolchain -- a mismatched build
-//! simply misses and recompiles. Bumping rquickjs changes
-//! `JS_GetVersion()` and thus the directory, so stale bytecode is never
-//! loaded.
+//! version, its bytecode format version, target arch, endianness, and
+//! pointer width. Bytecode is only ever loaded from the directory
+//! matching the running toolchain -- a mismatched build simply misses
+//! and recompiles. An engine whose bytecode format changed writes to a
+//! different directory, so stale bytecode is never loaded.
 //!
 //! ## Freshness
 //!
@@ -110,8 +109,8 @@ impl BytecodeCache {
 /// format version -- bump it on any change to the record shape, or to
 /// anything baked into the bytecode that a reader now depends on.
 ///
-/// Beyond the raw bytecode ABI (`QuickJS` version, arch, endianness,
-/// pointer width) the tag folds in this crate's version, as a proxy for
+/// Beyond the raw bytecode ABI (`QuickJS` version, bytecode format, arch,
+/// endianness, pointer width) the tag folds in this crate's version, as a proxy for
 /// the pinned rolldown/oxc bundler (a bundler upgrade alters
 /// transpilation/tree-shaking output while every input stamp still
 /// matches).
@@ -124,13 +123,33 @@ pub fn abi_tag() -> &'static str {
     let qjs = unsafe { std::ffi::CStr::from_ptr(rquickjs::qjs::JS_GetVersion()) }
       .to_str()
       .unwrap_or("unknown");
+    let format = bytecode_format().map_or_else(|| "unknown".to_owned(), |v| v.to_string());
     let endian = if cfg!(target_endian = "big") { "be" } else { "le" };
     format!(
-      "fjbc1-v{}-qjs{qjs}-{}-{endian}-p{}",
+      "fjbc1-v{}-qjs{qjs}-bc{format}-{}-{endian}-p{}",
       env!("CARGO_PKG_VERSION"),
       std::env::consts::ARCH,
       std::mem::size_of::<usize>() * 8,
     )
+  })
+}
+
+/// The engine's `BC_VERSION`, which `JS_WriteObject` emits as its first
+/// byte and `QuickJS` exports no other way. quickjs-ng bumps it on a
+/// bytecode format change without necessarily moving `JS_GetVersion()`:
+/// 0.16.2 has shipped writing both 27 and 28.
+fn bytecode_format() -> Option<u8> {
+  let rt = rquickjs::Runtime::new().ok()?;
+  let ctx = rquickjs::Context::full(&rt).ok()?;
+  ctx.with(|ctx| {
+    let module = rquickjs::Module::declare(ctx, "fjbc", "").ok()?;
+    let bytes = module
+      .write(rquickjs::WriteOptions {
+        endianness: rquickjs::WriteOptionsEndianness::Native,
+        ..Default::default()
+      })
+      .ok()?;
+    bytes.first().copied()
   })
 }
 

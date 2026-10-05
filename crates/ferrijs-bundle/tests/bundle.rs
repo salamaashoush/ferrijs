@@ -98,6 +98,18 @@ async fn the_cache_answers_the_second_compile_and_notices_an_edit() {
 }
 
 #[tokio::test]
+async fn the_cache_tag_names_the_bytecode_format_the_bundler_writes() {
+  let dir = project();
+  let compiled = bundler(BytecodeCache::disabled())
+    .compile(&[dir.path().join("entry.ts")], dir.path(), "entry.js")
+    .await
+    .expect("compile");
+  let format = compiled.bytecode[0];
+  let tag = ferrijs_bundle::abi_tag();
+  assert!(tag.contains(&format!("-bc{format}-")), "{tag}");
+}
+
+#[tokio::test]
 async fn a_bundle_error_names_the_file_and_line() {
   let dir = tempfile::tempdir().expect("tempdir");
   std::fs::write(dir.path().join("bad.ts"), "const x: number = ;\n").expect("write");
