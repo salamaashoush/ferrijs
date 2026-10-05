@@ -1423,7 +1423,7 @@ mod tests {
     let snap = p.env_snapshot();
     assert!(snap.iter().any(|(k, _)| k == "PATH"));
     assert!(!snap.iter().any(|(k, _)| k == "FERRIJS_SURELY_UNSET_VAR"));
-    assert!(Permissions::none().env_snapshot().is_empty());
+    assert_eq!(Permissions::none().env_snapshot(), Vec::<(String, String)>::new());
   }
 
   #[cfg(feature = "serde")]

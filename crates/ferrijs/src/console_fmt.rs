@@ -448,7 +448,7 @@ pub fn install_console_slot(ctx: &Ctx<'_>, slot: &Arc<ConsoleSlot>) -> rquickjs:
         let _ = slot
           .state
           .indent
-          .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(1)));
+          .try_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_sub(1)));
       }),
     )?;
   }

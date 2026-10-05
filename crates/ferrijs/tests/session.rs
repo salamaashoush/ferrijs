@@ -181,7 +181,7 @@ async fn syntax_error_reports_structured_error() {
     Err(error) => {
       // The thrown `SyntaxError` is classified by name.
       assert_eq!(error.kind, ScriptErrorKind::Syntax);
-      assert!(!error.message.is_empty());
+      assert_ne!(error.message, "");
     },
   }
 }

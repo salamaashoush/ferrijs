@@ -26,7 +26,7 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, FetchError>> + Sen
 /// An `Err` from the producer fails the body rather than ending it, so a
 /// source that breaks mid-send cannot be mistaken for a complete
 /// payload.
-#[must_use]
+#[must_use = "a stream does nothing until it is polled"]
 pub fn channel_stream(rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, String>>) -> ByteStream {
   futures::stream::unfold(rx, |mut rx| async move {
     let chunk = rx.recv().await?;
@@ -130,7 +130,7 @@ impl Body {
 
   /// Convert the body into a chunk stream (for a WHATWG `Response.body`
   /// `ReadableStream`). An empty body yields an empty stream.
-  #[must_use]
+  #[must_use = "a stream does nothing until it is polled"]
   pub fn into_stream(self) -> ByteStream {
     match self.0 {
       Inner::Empty => futures::stream::empty().boxed(),

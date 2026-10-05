@@ -79,7 +79,7 @@ impl VmHandle {
     // the script that is awaiting that callback.
     self
       .admission
-      .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
+      .try_update(Ordering::Relaxed, Ordering::Relaxed, |available| {
         available.checked_sub(1)
       })
       .map_err(|_| ScriptError::internal("VM job capacity exhausted"))?;
