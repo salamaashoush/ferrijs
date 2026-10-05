@@ -138,3 +138,61 @@ removed. Cargo metadata was checked to confirm that all six resolve to
 this checkout. A standalone checkout therefore needs the sibling runtime
 until those patches are replaced with a published release containing the
 fixes.
+
+## 0.6.0 release candidate, 2026-10-05
+
+Measured on the same machine with Rust 1.98.1, comparing 0.5.0 (rquickjs
+0.13) with the candidate (rquickjs 0.14). Both use the candidate's bench
+source and neither has the local QuickJS patch. A third build carries
+every change except the cache tag, the engine bump and the bench fix, so
+a difference can be placed either on the earlier fixes or on the engine.
+Builds alternated within each round. Every row and run, with 95%
+confidence intervals and the raw samples of the VM-job and run-bracket
+rows, is in [the measurement record](performance-2026-10-05.json).
+
+A full `just bench` now completes. The two module-evaluation cases
+declared every module on one realm for the whole run, and Criterion's
+warm-up ran that realm out of memory on 0.5.0 as well; they now take a
+fresh realm every 1024 evaluations, outside the timed loop.
+
+| Operation | 0.5.0 | Pre-engine | Candidate | Recorded 2026-09-12 |
+| --- | ---: | ---: | ---: | ---: |
+| Empty VM dispatch | 323 ns | 336 ns | 336 ns | 340 ns |
+| Dispatch floor | 320 ns | 339 ns | 337 ns | |
+| Empty run bracket | 674 ns | 693 ns | 683 ns | 694 ns |
+| Cached numeric script | 1.172 us | 1.162 us | 1.151 us | 1.166 us |
+| Cached script with one await | 2.305 us | 2.322 us | 2.341 us | 2.362 us |
+| Small script with one argument | 1.151 us | 1.166 us | 1.163 us | 1.241 us |
+| Batch of 16 concurrent runs | 14.55 us | 14.37 us | 14.80 us | 16.44 us |
+| Build default realm | 1.884 ms | 2.005 ms | 1.905 ms | 1.977 ms |
+| Hot script plus a cold one, 32 slots | 5.91 us | 4.01 us | 3.98 us | 3.84 us |
+
+Each cell is the mean of every run of that build, between two and nine
+of them. The candidate is no slower than the recorded figures on any
+VM-job or run-bracket row.
+
+Against 0.5.0, two differences outlast reruns. VM dispatch costs 13 to
+17 ns more, about 4%, and the scalar `json_to_js` and `value_to_json`
+cases move with it because a dispatch is most of their time. All of it
+arrives with the admission and cancellation change: the pre-engine build
+already has it and the engine adds nothing. It is the cost measured and
+explained in the section above.
+
+`crypto.getRandomValues` on a 32-byte array is 3.3% slower, and only
+with the new engine. quickjs-ng now hashes the atom before indexing an
+object's property table, where it used to mask the atom directly, to
+stop power-of-two keys from sharing a bucket. A profile of the case
+moves `JS_GetPropertyInternal` from 1.8% to 3.9% of samples. Nothing in
+the property-heavy JS rows moved beyond noise.
+
+The module registry's lookups, whose code has not changed since 0.5.0,
+moved by a fraction of a nanosecond in both directions (`serves_hit`
+0.2 ns slower, `canonical_hit` 0.6 ns faster). That is where the linker
+placed the code, not more work.
+
+Startup measured up to 6% slower in a single pass, and within 2.4%
+either way across three alternating rounds of 100 samples, so it is
+noise. Of the 103 cases, the full run marked 17 slower; two more
+alternating rounds left only the rows above. The full run also has the
+engine faster at `throw_catch_50k` (12.6%) and `sha256_20k` (5.1%),
+each from one run.
