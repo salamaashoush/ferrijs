@@ -1,6 +1,6 @@
 --- a/quickjs/quickjs.c
 +++ b/quickjs/quickjs.c
-@@ -53337,7 +53337,11 @@
+@@ -53354,7 +53354,11 @@
          break;
      case JS_TAG_OBJECT:
      case JS_TAG_SYMBOL:
@@ -13,7 +13,7 @@
          break;
      case JS_TAG_INT:
          d = JS_VALUE_GET_INT(key);
-@@ -53356,7 +53360,12 @@
+@@ -53373,7 +53377,12 @@
              d = NAN;
      hash_float64:
          u.d = d;

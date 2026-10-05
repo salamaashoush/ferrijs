@@ -54,7 +54,7 @@ ferrijs-serde = { path = "crates/ferrijs-serde", version = "0.5.0" }
 # `NDEBUG` for the vendored quickjs-ng build: without it every
 # `assert()` in the interpreter's hot paths is live in a release
 # artifact, which is not how upstream ships it.
-rquickjs = { version = "0.13", features = [
+rquickjs = { version = "0.14", features = [
   "full-async",
   "parallel",
   "macro",

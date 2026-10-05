@@ -14,7 +14,7 @@ It is vendored rather than depended on because upstream pins
 `rquickjs ^0.12`, and a version requirement cannot be worked around: two
 incompatible `rquickjs` in one graph means two incompatible `Value`
 types, so `ferrijs` could not have upgraded to 0.13 at all while the
-dependency stood. The code itself needed no changes for 0.13.
+dependency stood. The code itself needed no changes for 0.13 or 0.14.
 
 Kept byte-close to upstream so a re-sync stays a mechanical diff. Its own
 `rustfmt.toml` disables formatting (the workspace `ignore` key is
@@ -25,7 +25,7 @@ nightly-only); pedantic clippy is off for the same reason.
 1. Crate renamed `rquickjs-serde` -> `ferrijs-serde`: the doc examples
    and one test-local JS variable name follow the crate name.
 2. `Cargo.toml` takes its version, edition, repository and homepage from
-   the workspace, and `rquickjs` from `[workspace.dependencies]` (0.13).
+   the workspace, and `rquickjs` from `[workspace.dependencies]` (0.14).
 3. `de.rs`: five changes on the deserialize hot path, all
    behaviour-preserving. `Deserializer::from` no longer reserves a
    hundred slots for a stack that tracks nesting depth. `current_kv`
@@ -52,6 +52,7 @@ nightly-only); pedantic clippy is off for the same reason.
 git clone --depth 1 https://github.com/rquickjs/rquickjs-serde
 ```
 
-Diff `src/` against it, reapply delta 1, and check whether upstream has
-moved to `rquickjs` 0.13 or later — if it has, this crate can be dropped
-for the published one again.
+Diff `src/` against it and reapply the deltas. Upstream 0.8.0 requires
+`rquickjs` 0.14, so the version pin no longer forces this vendor; deltas
+3 to 5 do, and 0.8.0 still panics on a primitive proxy length. Once
+upstream carries them, this crate can be dropped for the published one.
