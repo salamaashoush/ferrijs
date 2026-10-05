@@ -573,3 +573,14 @@ the extension that needs it.
     exclusive flag aliases share their canonical flags' behavior. Open
     failures retain Node's `code`, `errno`, `syscall`, and `path` through
     `node::system_error`.
+
+39. **`fs/file_handle.rs` and `fs/open.rs` — `writeFile` on an append
+    handle appends.** Upstream's `FileHandle.writeFile` truncates the
+    file before every write. Node's never truncates, and on an append
+    handle its writes land at the end of the file. Upstream's truncate
+    there discarded the content the handle was opened to extend, and on
+    Windows it fails with `Access is denied`: append access is
+    `FILE_APPEND_DATA` without `FILE_WRITE_DATA`, and setting the end of
+    file needs the latter. `open` records whether its flags append, and
+    `writeFile` skips the truncate for those handles only. Other handles
+    keep upstream's truncate.

@@ -99,3 +99,28 @@ async fn combined_access_modes_require_each_grant() -> Result<(), Box<dyn std::e
   }
   Ok(())
 }
+
+#[tokio::test]
+async fn write_file_through_an_append_handle_appends() -> Result<(), Box<dyn std::error::Error>> {
+  let dir = tempfile::tempdir()?;
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_read([dir.path()]).allow_write([dir.path()]))
+    .build()
+    .await?;
+  for flag in ["a", "a+"] {
+    let path = dir.path().join(flag);
+    std::fs::write(&path, "Salama")?;
+    let run = rt
+      .eval_script(
+        "const fs = require('node:fs/promises');
+       const h = await fs.open(args[0], args[1]);
+       try { await h.writeFile(' Ashoush'); } finally { await h.close(); }
+       return await fs.readFile(args[0], 'utf8');",
+        &[serde_json::json!(path), flag.into()],
+        RunOptions::default(),
+      )
+      .await;
+    assert_eq!(run.result?, "Salama Ashoush", "{flag}");
+  }
+  Ok(())
+}

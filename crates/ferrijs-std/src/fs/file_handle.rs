@@ -30,13 +30,16 @@ pub struct FileHandle {
     file: Option<File>,
     #[qjs(skip_trace)]
     path: PathBuf,
+    #[qjs(skip_trace)]
+    append: bool,
 }
 
 impl FileHandle {
-    pub fn new(file: File, path: PathBuf) -> Self {
+    pub fn new(file: File, path: PathBuf, append: bool) -> Self {
         Self {
             file: Some(file),
             path,
+            append,
         }
     }
 
@@ -355,12 +358,19 @@ impl FileHandle {
         data: Either<ArrayBufferView<'js>, String>,
         options_or_encoding: Opt<Either<WriteFileOptions, String>>,
     ) -> Result<()> {
+        let append = self.append;
         let file = self.file_mut(&ctx)?;
 
-        // Always overwrite the whole file
-        file.set_len(0)
-            .await
-            .or_throw_msg(&ctx, "Failed to truncate file")?;
+        // LOCAL DELTA: an append handle writes at the end whatever the
+        // cursor says, as Node's does. Truncating it first discarded the
+        // content it was opened to extend, and on Windows cannot work at
+        // all: append access omits FILE_WRITE_DATA, which setting the
+        // end of file requires.
+        if !append {
+            file.set_len(0)
+                .await
+                .or_throw_msg(&ctx, "Failed to truncate file")?;
+        }
 
         let encoding = match options_or_encoding.0 {
             Some(Either::Left(options)) => options.encoding,
