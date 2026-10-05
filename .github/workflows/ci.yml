@@ -230,7 +230,7 @@ jobs:
   conclusion:
     name: CI conclusion
     if: always()
-    needs: [test, features, msrv, packaging, security, lockfile]
+    needs: [basics, test, features, msrv, packaging, security, lockfile]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
