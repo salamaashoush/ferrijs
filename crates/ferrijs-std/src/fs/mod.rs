@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 mod access;
+mod append_file;
 mod chmod;
 mod file_handle;
 mod guard;
@@ -37,6 +38,7 @@ pub struct FsPromisesModule;
 impl ModuleDef for FsPromisesModule {
     fn declare(declare: &Declarations) -> Result<()> {
         declare.declare("access")?;
+        declare.declare("appendFile")?;
         declare.declare("open")?;
         declare.declare("readFile")?;
         declare.declare("writeFile")?;
@@ -80,6 +82,7 @@ impl ModuleDef for FsModule {
     fn declare(declare: &Declarations) -> Result<()> {
         declare.declare("promises")?;
         declare.declare("accessSync")?;
+        declare.declare("appendFileSync")?;
         declare.declare("mkdirSync")?;
         declare.declare("mkdtempSync")?;
         declare.declare("readdirSync")?;
@@ -117,9 +120,10 @@ pub fn fill_fs<'js>(ctx: &Ctx<'js>, target: &Object<'js>) -> Result<()> {
 
     // LOCAL DELTA: every entry point is the guarded wrapper from
     // `guard.rs`, and `existsSync` (which upstream lacks) lives there
-    // too. See that file.
+    // too. See that file. `appendFileSync` is ours, from `append_file.rs`.
     target.set("promises", promises)?;
     target.set("accessSync", Func::from(access_sync_guarded))?;
+    target.set("appendFileSync", Func::from(append_file_sync_guarded))?;
     target.set("mkdirSync", Func::from(mkdir_sync_guarded))?;
     target.set("mkdtempSync", Func::from(mkdtemp_sync_guarded))?;
     target.set("readdirSync", Func::from(read_dir_sync_guarded))?;
@@ -202,6 +206,7 @@ fn export_promises<'js>(ctx: &Ctx<'js>, exports: &Object<'js>) -> Result<()> {
     export_constants(ctx, exports)?;
 
     exports.set("access", Func::from(Async(access_guarded)))?;
+    exports.set("appendFile", Func::from(Async(append_file_guarded)))?;
     exports.set("open", Func::from(Async(open_guarded)))?;
     exports.set("readFile", Func::from(Async(read_file_guarded)))?;
     exports.set("writeFile", Func::from(Async(write_file_guarded)))?;

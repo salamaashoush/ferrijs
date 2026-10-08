@@ -124,3 +124,81 @@ async fn write_file_through_an_append_handle_appends() -> Result<(), Box<dyn std
   }
   Ok(())
 }
+
+#[tokio::test]
+async fn append_file_creates_the_file_then_extends_it() -> Result<(), Box<dyn std::error::Error>> {
+  let dir = tempfile::tempdir()?;
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_read([dir.path()]).allow_write([dir.path()]))
+    .build()
+    .await?;
+  let run = rt
+    .eval_script(
+      "const fs = require('node:fs'); const fsp = require('node:fs/promises');
+       const [promised, synced] = args;
+       await fsp.appendFile(promised, 'Salama');
+       await fsp.appendFile(promised, Buffer.from(' Ashoush'));
+       fs.appendFileSync(synced, new TextEncoder().encode('Salama'));
+       fs.appendFileSync(synced, ' Ashoush');
+       return [await fsp.readFile(promised, 'utf8'), fs.readFileSync(synced, 'utf8')];",
+      &[
+        serde_json::json!(dir.path().join("promised")),
+        serde_json::json!(dir.path().join("synced")),
+      ],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(run.result?, serde_json::json!(["Salama Ashoush", "Salama Ashoush"]));
+  Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn append_file_mode_applies_only_when_it_creates() -> Result<(), Box<dyn std::error::Error>> {
+  use std::os::unix::fs::PermissionsExt;
+
+  let dir = tempfile::tempdir()?;
+  let path = dir.path().join("created");
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_read([dir.path()]).allow_write([dir.path()]))
+    .build()
+    .await?;
+  let run = rt
+    .eval_script(
+      "const fs = require('node:fs');
+       fs.appendFileSync(args[0], 'Salama', { mode: 0o600 });
+       await require('node:fs/promises').appendFile(args[0], ' Ashoush', { mode: 0o644 });
+       return fs.readFileSync(args[0], 'utf8');",
+      &[serde_json::json!(path)],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(run.result?, "Salama Ashoush");
+  assert_eq!(std::fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+  Ok(())
+}
+
+#[tokio::test]
+async fn append_file_needs_a_write_grant() -> Result<(), Box<dyn std::error::Error>> {
+  let dir = tempfile::tempdir()?;
+  let path = dir.path().join("denied");
+  let rt = Runtime::builder()
+    .permissions(Permissions::none().allow_read([dir.path()]))
+    .build()
+    .await?;
+  let run = rt
+    .eval_script(
+      "const shape = e => [e.name, e.code, e.permission];
+       const out = [];
+       try { await require('node:fs/promises').appendFile(args[0], 'x'); out.push('allowed'); } catch (e) { out.push(shape(e)); }
+       try { require('node:fs').appendFileSync(args[0], 'x'); out.push('allowed'); } catch (e) { out.push(shape(e)); }
+       return out;",
+      &[serde_json::json!(path)],
+      RunOptions::default(),
+    )
+    .await;
+  let denied = serde_json::json!(["PermissionDeniedError", "ERR_ACCESS_DENIED", "write"]);
+  assert_eq!(run.result?, serde_json::json!([denied, denied]));
+  assert!(!path.exists());
+  Ok(())
+}

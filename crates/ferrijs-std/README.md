@@ -584,3 +584,14 @@ the extension that needs it.
     file needs the latter. `open` records whether its flags append, and
     `writeFile` skips the truncate for those handles only. Other handles
     keep upstream's truncate.
+
+40. **`fs/append_file.rs` — `appendFile` and `appendFileSync`.** Upstream
+    ships neither (still absent at `awslabs/llrt@f08cdfa`, 2026-10-07), so
+    a script that logs to a file failed at import with a missing export.
+    Both open with `O_APPEND | O_CREAT`, apply `mode` only when they create
+    the file as Node does, and read options the way `writeFile` does here.
+    Failures keep Node's `code`, `errno`, `syscall` and `path` through
+    `node::system_error`. `guard.rs` checks the write grant in front of
+    both, exactly as for `writeFile`. The file is ours: a re-sync leaves
+    it alone, and only its `mod` line and registrations in `fs/mod.rs`
+    need re-adding.

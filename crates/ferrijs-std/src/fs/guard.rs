@@ -14,6 +14,7 @@ use either::Either;
 use rquickjs::{function::Opt, Ctx, Object, Result, Value};
 
 use super::access::{access, access_sync};
+use super::append_file::{append_file, append_file_sync};
 use super::chmod::{chmod, chmod_sync};
 use super::file_handle::FileHandle;
 use super::mkdir::{mkdir, mkdir_sync, mkdtemp, mkdtemp_sync};
@@ -48,6 +49,26 @@ fn check_access_mode(ctx: &Ctx<'_>, path: &str, mode: Option<u32>) -> Result<()>
         check_read(ctx, path)?;
     }
     Ok(())
+}
+
+pub(super) async fn append_file_guarded<'js>(
+    ctx: Ctx<'js>,
+    path: String,
+    data: Value<'js>,
+    options: Opt<Either<String, WriteFileOptions>>,
+) -> Result<()> {
+    check_write(&ctx, Path::new(&path))?;
+    append_file(ctx, path, data, options).await
+}
+
+pub(super) fn append_file_sync_guarded<'js>(
+    ctx: Ctx<'js>,
+    path: String,
+    bytes: ObjectBytes<'js>,
+    options: Opt<Either<String, WriteFileOptions>>,
+) -> Result<()> {
+    check_write(&ctx, Path::new(&path))?;
+    append_file_sync(ctx, path, bytes, options)
 }
 
 pub(super) async fn chmod_guarded(ctx: Ctx<'_>, path: String, mode: u32) -> Result<()> {
