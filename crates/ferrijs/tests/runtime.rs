@@ -730,6 +730,26 @@ async fn an_extension_adds_a_module_and_a_global() {
 }
 
 #[tokio::test]
+async fn an_extension_that_throws_while_installing_reports_its_error() {
+  struct Thrower;
+  impl ferrijs::Extension for Thrower {
+    fn name(&self) -> &'static str {
+      "thrower"
+    }
+    fn install(&self, ctx: &rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+      Err(rquickjs::Exception::throw_message(ctx, "sashoush refused the install"))
+    }
+  }
+  let Err(error) = Runtime::builder().extension(Thrower).build().await else {
+    panic!("an extension that throws must fail the build");
+  };
+  assert_eq!(
+    error.message,
+    "extension `thrower` failed to install: Error: sashoush refused the install"
+  );
+}
+
+#[tokio::test]
 async fn require_refuses_what_is_not_native() {
   let rt = plain().await;
   let run = rt
