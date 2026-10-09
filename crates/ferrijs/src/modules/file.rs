@@ -115,14 +115,17 @@ impl Default for ModulePolicy {
 pub struct FileResolver {
   policy: ModulePolicy,
   /// The root, canonicalised once, so the jail check compares like with
-  /// like.
-  canonical_root: PathBuf,
+  /// like. Only a jailed policy reads it, so only a jailed one pays the
+  /// filesystem round trip at build.
+  canonical_root: Option<PathBuf>,
 }
 
 impl FileResolver {
   #[must_use]
   pub fn new(policy: ModulePolicy) -> Self {
-    let canonical_root = std::fs::canonicalize(&policy.root).unwrap_or_else(|_| policy.root.clone());
+    let canonical_root = policy
+      .jail
+      .then(|| std::fs::canonicalize(&policy.root).unwrap_or_else(|_| policy.root.clone()));
     Self { policy, canonical_root }
   }
 
@@ -167,13 +170,15 @@ impl Resolver for FileResolver {
     let resolved = std::fs::canonicalize(&joined)
       .map_err(|e| Error::new_loading_message(name, format!("cannot resolve {}: {e}", joined.display())))?;
 
-    if self.policy.jail && !resolved.starts_with(&self.canonical_root) {
+    if let Some(root) = &self.canonical_root
+      && !resolved.starts_with(root)
+    {
       return Err(Error::new_loading_message(
         name,
         format!(
           "module {} is outside the module root {}",
           resolved.display(),
-          self.canonical_root.display()
+          root.display()
         ),
       ));
     }
