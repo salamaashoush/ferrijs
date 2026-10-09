@@ -984,7 +984,7 @@ impl CryptoProvider for RustCryptoProvider {
         let pkcs8 = AsDer::<Pkcs8V1Der<'_>>::as_der(&key)
             .map_err(|_| CryptoError::OperationFailed(None))?;
         let private_key = rsa_pkcs1_from_pkcs8(pkcs8.as_ref())?;
-        let public_key = pkcs1::RsaPrivateKey::from_der(&private_key)
+        let public_key = pkcs1::RsaPrivateKeyRef::from_der(&private_key)
             .map_err(|_| CryptoError::OperationFailed(None))
             .and_then(|k| {
                 pkcs1::RsaPublicKey {
@@ -1003,7 +1003,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
         let public_key =
-            pkcs1::RsaPublicKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+            pkcs1::RsaPublicKeyRef::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
         let key_data = public_key
@@ -1023,7 +1023,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaImportResult, CryptoError> {
         use der::Decode;
         let private_key =
-            pkcs1::RsaPrivateKey::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
+            pkcs1::RsaPrivateKeyRef::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
         let key_data = private_key
@@ -1044,7 +1044,7 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let spki = spki::SubjectPublicKeyInfoRef::try_from(der)
             .map_err(|_| CryptoError::InvalidKey(None))?;
-        let public_key = pkcs1::RsaPublicKey::from_der(spki.subject_public_key.raw_bytes())
+        let public_key = pkcs1::RsaPublicKeyRef::from_der(spki.subject_public_key.raw_bytes())
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = public_key.modulus.as_bytes().len() * 8;
         let public_exponent = public_key.public_exponent.as_bytes().to_vec();
@@ -1066,7 +1066,7 @@ impl CryptoProvider for RustCryptoProvider {
         use der::Decode;
         let pk_info =
             pkcs8::PrivateKeyInfoRef::from_der(der).map_err(|_| CryptoError::InvalidKey(None))?;
-        let private_key = pkcs1::RsaPrivateKey::from_der(pk_info.private_key.as_bytes())
+        let private_key = pkcs1::RsaPrivateKeyRef::from_der(pk_info.private_key.as_bytes())
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let modulus_length = private_key.modulus.as_bytes().len() * 8;
         let public_exponent = private_key.public_exponent.as_bytes().to_vec();
@@ -1086,7 +1086,7 @@ impl CryptoProvider for RustCryptoProvider {
 
     fn export_rsa_public_key_spki(&self, key_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use der::{Decode, Encode};
-        let public_key = pkcs1::RsaPublicKey::from_der(key_data)
+        let public_key = pkcs1::RsaPublicKeyRef::from_der(key_data)
             .map_err(|_| CryptoError::InvalidKey(None))?;
         let spki = spki::SubjectPublicKeyInfo {
             algorithm: spki::AlgorithmIdentifier::<der::asn1::Any> {
@@ -1107,7 +1107,7 @@ impl CryptoProvider for RustCryptoProvider {
         // PKCS#8 is the PKCS#1 key this provider stores, wrapped in an
         // algorithm identifier. That is ASN.1 only, so no key parsing is
         // needed and a malformed key still fails here.
-        pkcs1::RsaPrivateKey::from_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
+        pkcs1::RsaPrivateKeyRef::from_der(key_data).map_err(|_| CryptoError::InvalidKey(None))?;
         rsa_pkcs8_from_pkcs1(key_data)
     }
 
@@ -1381,7 +1381,7 @@ impl CryptoProvider for RustCryptoProvider {
     ) -> Result<super::RsaJwkExport, CryptoError> {
         use der::Decode;
         if is_private {
-            let key = pkcs1::RsaPrivateKey::from_der(key_data)
+            let key = pkcs1::RsaPrivateKeyRef::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),
@@ -1394,7 +1394,7 @@ impl CryptoProvider for RustCryptoProvider {
                 qi: Some(key.coefficient.as_bytes().to_vec()),
             })
         } else {
-            let key = pkcs1::RsaPublicKey::from_der(key_data)
+            let key = pkcs1::RsaPublicKeyRef::from_der(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
             Ok(super::RsaJwkExport {
                 n: key.modulus.as_bytes().to_vec(),

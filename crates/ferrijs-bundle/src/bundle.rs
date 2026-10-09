@@ -28,7 +28,7 @@ use rolldown::{
 use rolldown_common::{CodeSplittingMode, ModuleType, Output, ResolveOptions, TsConfig};
 use rolldown_plugin::{
   HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
-  Plugin, PluginContext, SharedLoadPluginContext,
+  Plugin, PluginContext, Pluginable, SharedLoadPluginContext,
 };
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness};
 
@@ -457,7 +457,7 @@ impl Bundler {
     let build_started = Instant::now();
     let mut bundler = Rolldown::with_plugins(
       options,
-      vec![Arc::new(RuntimePlugin {
+      vec![Pluginable::new_shared(RuntimePlugin {
         env: Arc::clone(&env),
         registry: Arc::clone(&self.registry),
         multi_entry,
