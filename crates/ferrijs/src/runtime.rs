@@ -1062,8 +1062,16 @@ impl Runtime {
 
 /// The body of [`Runtime::eval_script`], for a host running it under
 /// its own [`Runtime::run`] bracket with globals of its own installed
-/// first: bind `args`, wrap `source` in an async IIFE, evaluate, and
-/// answer the `return` value as JSON.
+/// first: bind `args`, wrap `source` in an IIFE, evaluate, and answer the
+/// `return` value as JSON.
+///
+/// The wrapper is `async` only when the source mentions `await`. An
+/// async function makes a promise, its resolving functions and a frame
+/// state on every call, which a script that never awaits does not need;
+/// what it returns is settled the way an async function would settle it
+/// instead (a promise awaited, a thenable adopted), so both wrappers
+/// answer the same. A false positive (`await` in a string) only costs the
+/// async path.
 ///
 /// # Errors
 ///
@@ -1074,30 +1082,50 @@ pub async fn script_body(
   args: &[serde_json::Value],
 ) -> Result<serde_json::Value, ScriptError> {
   install_args(ctx, args)?;
+  let caught = |e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1);
   let body = if let Some(f) = crate::script_cache::get(ctx, source) {
     f
   } else {
     // One line of wrapper before the user's source, so a reported
     // position is offset by one. The arrow is compiled but not called,
     // so the same function serves every later run.
+    let head = if source.contains("await") {
+      "(async () => {\n"
+    } else {
+      "(() => {\n"
+    };
     let mut wrapped = String::with_capacity(source.len() + 24);
-    wrapped.push_str("(async () => {\n");
+    wrapped.push_str(head);
     wrapped.push_str(source);
     wrapped.push_str("\n})");
-    let f: rquickjs::Function<'_> = ctx
-      .eval(wrapped.as_bytes())
-      .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+    let f: rquickjs::Function<'_> = ctx.eval(wrapped.as_bytes()).map_err(caught)?;
     crate::script_cache::put(ctx, source, &f);
     f
   };
-  let promise: rquickjs::Promise<'_> = body
-    .call(())
-    .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
-  let value: Value<'_> = promise
-    .into_future::<Value<'_>>()
-    .await
-    .map_err(|e| ScriptError::from_caught_offset(ctx, rquickjs::CaughtError::from_error(ctx, e), source, 1))?;
+  let returned: Value<'_> = body.call(()).map_err(caught)?;
+  let value = match pending(ctx, returned).map_err(caught)? {
+    Ok(value) => value,
+    Err(promise) => promise.into_future::<Value<'_>>().await.map_err(caught)?,
+  };
   Ok(crate::value::value_to_json(ctx, value).unwrap_or(serde_json::Value::Null))
+}
+
+/// What an async function would make of returning `value`: the value
+/// itself, or the promise to wait on for a promise or a thenable, which
+/// it adopts. Synchronous, so the script body keeps its one await.
+fn pending<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Result<Value<'js>, rquickjs::Promise<'js>>> {
+  let value = match value.try_into_promise() {
+    Ok(promise) => return Ok(Err(promise)),
+    Err(value) => value,
+  };
+  if let Some(object) = value.as_object()
+    && object.get::<_, Value<'js>>("then")?.is_function()
+  {
+    let (promise, resolve, _reject) = ctx.promise()?;
+    resolve.call::<_, ()>((value,))?;
+    return Ok(Err(promise));
+  }
+  Ok(Ok(value))
 }
 
 /// The body of [`Runtime::eval_module`]: register the module's source
