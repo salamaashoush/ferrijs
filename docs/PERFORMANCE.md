@@ -196,3 +196,53 @@ noise. Of the 103 cases, the full run marked 17 slower; two more
 alternating rounds left only the rows above. The full run also has the
 engine faster at `throw_catch_50k` (12.6%) and `sha256_20k` (5.1%),
 each from one run.
+
+## Lazy globals and the parked-run backstop, 2026-10-10
+
+Measured on an Apple M-series Mac (18 cores) with Rust 1.99.0, comparing
+the commit before these changes (`54a066c`) with the result. The desktop
+carried other builds and browser tests throughout, which moved Criterion
+wall times by up to 8% between identical binaries. These figures are
+therefore instructions retired, which `/usr/bin/time -l` reports per
+process: `examples/profile` runs each workload single-threaded at two
+iteration counts, and the difference divided by the extra iterations is
+the cost of one. Builds alternate on every repetition, and the old
+binary runs twice under two names so each table carries its own noise
+floor.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Build a default realm | 3,050,506 | 2,188,420 |
+| Empty VM dispatch | 3,718 | 3,723 |
+| Empty run bracket | 7,522 | 7,159 |
+| Cached script returning a number | 14,091 | 13,743 |
+| Script with one `await` | 28,328 | 28,036 |
+| Script returning its object argument | 32,561 | 32,207 |
+| Script returning a JSON literal | 14,494 | 14,155 |
+| Script returning an object literal | 37,899 | 37,876 |
+
+The same-binary control moved by at most 0.2% on any row. Building a
+realm costs 28% fewer instructions, because the streams, `Buffer`,
+`crypto`, `URL`, the text codecs, `performance`, `FormData` and the
+compression streams install on first read rather than at build. The run
+bracket is cheaper because the backstop timer now starts only once a run
+parks on an await outside the VM. Before, every run registered a tokio
+timer, which locks a timer wheel that every realm on the runtime shares.
+
+Two effects had to be found before that held. A lazy realm keeps no
+promise alive, and QuickJS caches an object shape only while some object
+uses it, so every async run rebuilt the Promise shape: about 200
+instructions a run until `PromisePrimordials` was made at build again.
+Lazy globals alone also left 50 to 80 instructions on two workloads
+that no changed code runs on, which bisection put on code generation
+rather than work; the backstop change more than covers it. A
+`JSON.stringify` fast path for `value_to_json` was tried and measured
+28 to 33% more instructions on objects than the serde walker, so it was
+dropped.
+
+Reproduce with any two builds of `examples/profile`:
+
+```sh
+/usr/bin/time -l target/release/examples/profile script_noop 300000 --threads 1
+/usr/bin/time -l target/release/examples/profile script_noop 50000 --threads 1
+```
