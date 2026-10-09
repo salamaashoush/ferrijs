@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use rquickjs::function::{Func, Rest};
-use rquickjs::{Ctx, Object, Result, Value};
+use rquickjs::{Ctx, Function, Object, Result, Value};
 
 /// The names the module re-exports. `process` itself is installed by the
 /// host; anything it does not set simply does not appear.
@@ -128,12 +128,10 @@ pub fn install(ctx: &Ctx<'_>, options: &ProcessOptions) -> rquickjs::Result<()> 
   let root = options.cwd.clone();
   p.set("cwd", Func::from(move || root.clone()))?;
 
-  // nextTick -> microtask; the host installs `queueMicrotask`.
-  let next_tick = ctx.eval::<Value<'_>, _>(
-    "((cb, ...a) => { if (typeof cb !== 'function') throw new TypeError('callback required'); \
-       queueMicrotask(() => cb(...a)); })",
-  )?;
-  p.set("nextTick", next_tick)?;
+  // nextTick -> microtask through the realm's own `queueMicrotask`, which
+  // the host installs and which carries its callback policy. Native, so a
+  // realm build compiles no source for it.
+  p.set("nextTick", Function::new(ctx.clone(), next_tick)?.with_length(1)?)?;
 
   // stdout/stderr: only `.write(chunk)` — routed into the same console
   // capture the `console` global feeds (so output surfaces in
@@ -257,3 +255,23 @@ fn freeze<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<()> {
   freeze.call::<_, Value<'js>>((obj.clone(),))?;
   Ok(())
 }
+
+/// `process.nextTick(cb, ...args)`: `cb` called with `args` and an
+/// undefined `this` from the microtask queue.
+fn next_tick<'js>(ctx: Ctx<'js>, cb: Value<'js>, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
+  let Some(cb) = cb.into_function() else {
+    return Err(rquickjs::Exception::throw_type(&ctx, "callback required"));
+  };
+  let queue: Function<'js> = ctx.globals().get("queueMicrotask")?;
+  if args.0.is_empty() {
+    return queue.call((cb,));
+  }
+  let bind: Function<'js> = cb.get("bind")?;
+  let mut bind_args = rquickjs::function::Args::new(ctx.clone(), args.0.len() + 1);
+  bind_args.this(cb)?;
+  bind_args.push_arg(rquickjs::Undefined)?;
+  bind_args.push_args(args.0)?;
+  let bound: Function<'js> = bind.call_arg(bind_args)?;
+  queue.call((bound,))
+}
+
