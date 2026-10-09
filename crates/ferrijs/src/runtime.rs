@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ferrijs_permissions::{Container, Permissions};
+use rquickjs::context::intrinsic;
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Value};
 
 use crate::console::{ConsoleCapture, ConsoleSink};
@@ -145,6 +146,11 @@ impl std::fmt::Debug for Config {
 /// grant nothing.
 pub struct Builder {
   config: Config,
+  /// The policy the host chose, if it chose one. The default anchors at
+  /// the working directory, and asking the OS for that costs a few
+  /// microseconds a realm, so it is not asked for a host that names its
+  /// own root.
+  modules: Option<ModulePolicy>,
 }
 
 impl Default for Builder {
@@ -154,7 +160,7 @@ impl Default for Builder {
         limits: Limits::default(),
         console: ConsoleOptions::default(),
         realm: RealmOptions::default(),
-        modules: ModulePolicy::default(),
+        modules: ModulePolicy::new(std::path::PathBuf::new()),
         process: ProcessOptions::default(),
         identity: ferrijs_std::identity::Identity::default(),
         permissions: Arc::new(Container::new(Permissions::none())),
@@ -168,6 +174,7 @@ impl Default for Builder {
         fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
       },
+      modules: None,
     }
   }
 }
@@ -193,7 +200,7 @@ impl Builder {
 
   #[must_use]
   pub fn modules(mut self, policy: ModulePolicy) -> Self {
-    self.config.modules = policy;
+    self.modules = Some(policy);
     self
   }
 
@@ -306,8 +313,12 @@ impl Builder {
   ///
   /// When the engine cannot be created, an extension's modules clash,
   /// or an install fails.
-  pub async fn build(self) -> Result<Runtime, ScriptError> {
-    Runtime::create(self.config).await
+  pub async fn build(mut self) -> Result<Runtime, ScriptError> {
+    self.config.modules = self.modules.unwrap_or_default();
+    // Boxed so a host's future holds a pointer rather than the whole
+    // install state machine: one allocation against a realm's worth of
+    // work, and every caller's task stays small.
+    Box::pin(Runtime::create(self.config)).await
   }
 }
 
@@ -535,9 +546,22 @@ impl Runtime {
       )
       .await;
 
-    let ctx = AsyncContext::full(&runtime)
-      .await
-      .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
+    // `JS_NewContext` less `atob`, `btoa` and `performance`: the standard
+    // library installs its own of all three, so the engine's were built
+    // only to be overwritten and then collected with the realm.
+    let ctx = AsyncContext::custom::<(
+      intrinsic::Date,
+      intrinsic::Eval,
+      intrinsic::RegExp,
+      intrinsic::Json,
+      intrinsic::Proxy,
+      intrinsic::MapSet,
+      intrinsic::TypedArrays,
+      intrinsic::Promise,
+      intrinsic::WeakRef,
+    )>(&runtime)
+    .await
+    .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
 
     let (vm, vm_shutdown) = spawn_vm_loop_with_capacity(&ctx, config.vm_capacity);
 

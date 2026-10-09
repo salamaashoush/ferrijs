@@ -17,6 +17,7 @@ use base64::Engine as _;
 use base64::engine::GeneralPurpose;
 use base64::engine::general_purpose::GeneralPurposeConfig;
 use rquickjs::function::{Constructor, Func, This};
+use rquickjs::object::Property;
 use rquickjs::{Class, Ctx, Filter, Object, TypedArray, Value};
 
 /// Install `atob`, `btoa`, `structuredClone`, `performance`, `FormData`
@@ -29,9 +30,12 @@ pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
   // btoa/atob over a Latin1 "binary string", per the WHATWG contract.
-  globals.set(
+  // Writable and configurable but not enumerable: the attributes the
+  // engine's own pair carried when this replaced them in place, kept now
+  // that the realm is built without the engine's.
+  globals.prop(
     "btoa",
-    Func::from(|s: String| -> rquickjs::Result<String> {
+    Property::from(Func::from(|s: String| -> rquickjs::Result<String> {
       let mut bytes = Vec::with_capacity(s.len());
       for ch in s.chars() {
         let c = ch as u32;
@@ -45,15 +49,19 @@ pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         bytes.push(c as u8);
       }
       Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-    }),
+    }))
+    .writable()
+    .configurable(),
   )?;
-  globals.set(
+  globals.prop(
     "atob",
-    Func::from(|s: String| -> rquickjs::Result<String> {
+    Property::from(Func::from(|s: String| -> rquickjs::Result<String> {
       let bytes = forgiving_base64_decode(&s)
         .map_err(|m| rquickjs::Error::new_from_js_message("atob", "InvalidCharacterError", m.to_string()))?;
       Ok(bytes.into_iter().map(|b| b as char).collect())
-    }),
+    }))
+    .writable()
+    .configurable(),
   )?;
 
   globals.set("structuredClone", Func::from(structured_clone))?;
