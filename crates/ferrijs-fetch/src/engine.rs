@@ -8,7 +8,7 @@
 //! reqwest jar (standalone) or the browser context (bridged) — the only
 //! difference between the two.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -31,7 +31,10 @@ type ClientKey = (bool, Option<(bool, bool)>, bool);
 /// does) and shares the pool's cookie jar, if it has one.
 #[derive(Clone)]
 pub struct ClientPool {
-  base: reqwest::Client,
+  /// Built on the first request rather than with the pool: a realm per
+  /// request pays for a reqwest client (TLS roots, connector, proxy
+  /// lookup from the environment) whether or not its script fetches.
+  base: Arc<OnceLock<reqwest::Client>>,
   /// `Some` for a standalone client (reqwest owns the jar); `None` for a
   /// context-bound client (the browser is the jar).
   jar: Option<Arc<reqwest::cookie::Jar>>,
@@ -43,11 +46,9 @@ impl ClientPool {
   /// A standalone pool with its own reqwest cookie jar.
   #[must_use]
   pub fn standalone(ignore_https: bool) -> Self {
-    let jar = Arc::new(reqwest::cookie::Jar::default());
-    let base = build_client(Some(&jar), ignore_https, None);
     Self {
-      base,
-      jar: Some(jar),
+      base: Arc::new(OnceLock::new()),
+      jar: Some(Arc::new(reqwest::cookie::Jar::default())),
       default_ignore_https: ignore_https,
       variants: Arc::new(Mutex::new(FxHashMap::default())),
     }
@@ -57,7 +58,7 @@ impl ClientPool {
   #[must_use]
   pub fn bridged() -> Self {
     Self {
-      base: build_client(None, false, None),
+      base: Arc::new(OnceLock::new()),
       jar: None,
       default_ignore_https: false,
       variants: Arc::new(Mutex::new(FxHashMap::default())),
@@ -70,7 +71,10 @@ impl ClientPool {
     // owns one (bridged pools have none — cookies ride the browser).
     let attach_jar = use_jar && self.jar.is_some();
     if ignore_https == self.default_ignore_https && dns.is_none() && attach_jar == self.jar.is_some() {
-      return self.base.clone();
+      return self
+        .base
+        .get_or_init(|| build_client(self.jar.as_ref(), self.default_ignore_https, None))
+        .clone();
     }
     let jar = attach_jar.then(|| self.jar.clone()).flatten();
     let mut cache = self.variants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
