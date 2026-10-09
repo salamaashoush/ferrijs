@@ -604,7 +604,7 @@ impl Runtime {
 
     let (vm, vm_shutdown) = spawn_vm_loop_with_capacity(&ctx, config.vm_capacity);
 
-    let base_console = Arc::new(Self::console_capture(&config));
+    let base_console = Arc::new(Self::console_capture(&config, Instant::now()));
     let install_console_capture = Arc::clone(&base_console);
     let kept_console = Arc::clone(&base_console);
     let console_slot = Arc::new(ConsoleSlot::new(Arc::clone(&base_console)));
@@ -709,11 +709,12 @@ impl Runtime {
     })
   }
 
-  fn console_capture(config: &Config) -> ConsoleCapture {
-    let capture = ConsoleCapture::new(
+  fn console_capture(config: &Config, started: Instant) -> ConsoleCapture {
+    let capture = ConsoleCapture::starting_at(
       config.console.max_entries,
       config.console.max_bytes,
       config.console.max_entry_bytes,
+      started,
     );
     let capture = match &config.redactor {
       Some(redactor) => capture.with_redactor(Arc::clone(redactor)),
@@ -819,7 +820,7 @@ impl Runtime {
     let console = if streaming {
       Arc::clone(&self.base_console)
     } else {
-      Arc::new(Self::console_capture(&self.config))
+      Arc::new(Self::console_capture(&self.config, started))
     };
     if self.poisoned() {
       return Run {
@@ -849,7 +850,7 @@ impl Runtime {
     let fut = crate::vm::vm_with_parked!(reservation, Arc::clone(&parked) => |ctx| { body(ctx).await });
 
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
-    let budget = Budget::start(self.timeout.clock(), backstop);
+    let budget = Budget::starting_at(self.timeout.clock(), backstop, started);
     let outcome = if let Ok(r) = budget.run_once_parked(&parked, fut).await {
       r.and_then(|inner| inner)
     } else {

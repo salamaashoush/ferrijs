@@ -336,11 +336,16 @@ pub(crate) struct Budget<'a> {
 
 impl<'a> Budget<'a> {
   pub(crate) fn start(clock: &'a Arc<dyn PauseClock>, limit: Duration) -> Self {
+    Self::starting_at(clock, limit, Instant::now())
+  }
+
+  /// [`Self::start`] from an instant the caller already read.
+  pub(crate) fn starting_at(clock: &'a Arc<dyn PauseClock>, limit: Duration, started: Instant) -> Self {
     let never_parks = clock.never_parks();
     Self {
       clock,
       limit,
-      started: Instant::now(),
+      started,
       parked_before: if never_parks {
         Duration::ZERO
       } else {

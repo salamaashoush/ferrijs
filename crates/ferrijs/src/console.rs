@@ -68,11 +68,18 @@ struct ConsoleInner {
 impl ConsoleCapture {
   #[must_use]
   pub fn new(max_entries: usize, max_total_bytes: usize, max_entry_bytes: usize) -> Self {
+    Self::starting_at(max_entries, max_total_bytes, max_entry_bytes, Instant::now())
+  }
+
+  /// [`Self::new`] counting `ts_ms` from `started`, for a caller that has
+  /// already read the clock for the same moment.
+  #[must_use]
+  pub fn starting_at(max_entries: usize, max_total_bytes: usize, max_entry_bytes: usize, started: Instant) -> Self {
     Self {
       max_entries,
       max_total_bytes,
       max_entry_bytes,
-      started: Instant::now(),
+      started,
       sink: None,
       redactor: None,
       inner: Mutex::new(ConsoleInner {
