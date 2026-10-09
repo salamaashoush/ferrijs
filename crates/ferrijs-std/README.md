@@ -595,3 +595,29 @@ the extension that needs it.
     both, exactly as for `writeFile`. The file is ours: a re-sync leaves
     it alone, and only its `mod` line and registrations in `fs/mod.rs`
     need re-adding.
+
+41. **Lazy globals: `utils/primordials.rs` and the primordials it serves.**
+    `init_lazy` (ours, in `lib.rs`, with `lazy.rs`) puts the heavier
+    globals behind accessors that install their group on first read.
+    Rust can build a group's objects before any script reads the global
+    (a `Buffer` from `fs.readFileSync`, a `Response` body stream), so the
+    `Primordial` trait gains `LAZY_GLOBAL`, naming the global whose group
+    makes it, and `get` installs that group when the primordial is
+    missing. `PromisePrimordials`, `ArrayConstructorPrimordials`,
+    `WritableStreamDefaultControllerPrimordials`, `IteratorPrimordials`
+    and `BufferPrimordials` set it.
+
+    rquickjs refuses to insert userdata while any userdata is borrowed,
+    and the stream code holds `BasePrimordials` across calls that reach
+    `get`. A lazy realm therefore reserves each such slot at build
+    (`Reserved`, filled in place by `init`), and `get` answers a
+    `PrimordialRef` that derefs to either form rather than a bare
+    `UserDataGuard`. `stream_web::reserve_primordials` and
+    `buffer::reserve_primordials` list the slots. `PromisePrimordials` is
+    made at build instead: the promise it holds keeps QuickJS's Promise
+    shape cached, and without it every async run pays to rebuild it.
+
+    `web/form_data.rs` installs the buffer group before it makes a `File`,
+    whose prototype only chains to `Blob` once that group has run. Tests
+    in `crates/ferrijs/tests/lazy_globals.rs` hold a lazy realm to the
+    eager one and cover each Rust path above.

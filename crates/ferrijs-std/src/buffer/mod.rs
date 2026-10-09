@@ -67,6 +67,12 @@ impl From<BufferModule> for ModuleInfo<BufferModule> {
     }
 }
 
+/// Local delta: reserve `BufferPrimordials`' slot, for a realm that
+/// installs `Buffer` lazily. See `crate::utils::primordials::Reserved`.
+pub(crate) fn reserve_primordials(ctx: &Ctx<'_>) {
+    BufferPrimordials::reserve(ctx);
+}
+
 pub fn init<'js>(ctx: &Ctx<'js>) -> Result<()> {
     BasePrimordials::init(ctx)?;
 

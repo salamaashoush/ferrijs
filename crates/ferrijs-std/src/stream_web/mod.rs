@@ -54,6 +54,23 @@ pub fn create_transform_stream<'js>(
     Ok(TransformStream::from_transformer(ctx.clone(), transformer)?.into_inner())
 }
 
+/// Local delta: reserve the slot of every primordial [`init_primordials`]
+/// makes, for a realm that installs the streams lazily. See
+/// `crate::utils::primordials::Reserved`.
+///
+/// `PromisePrimordials` is made now rather than reserved. It holds a
+/// resolved promise for the realm's life, and QuickJS keeps an object
+/// shape cached only while some object has it: without a long-lived
+/// promise, every async run builds the Promise shape afresh and frees it
+/// at the end, about 200 instructions a run.
+pub(crate) fn reserve_primordials(ctx: &Ctx<'_>) -> Result<()> {
+    PromisePrimordials::init(ctx)?;
+    ArrayConstructorPrimordials::reserve(ctx);
+    WritableStreamDefaultControllerPrimordials::reserve(ctx);
+    IteratorPrimordials::reserve(ctx);
+    Ok(())
+}
+
 fn init_primordials(ctx: &Ctx<'_>) -> Result<()> {
     BasePrimordials::init(ctx)?;
     PromisePrimordials::init(ctx)?;

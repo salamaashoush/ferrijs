@@ -851,6 +851,8 @@ pub(crate) struct WritableStreamDefaultControllerPrimordials<'js> {
 }
 
 impl<'js> Primordial<'js> for WritableStreamDefaultControllerPrimordials<'js> {
+    const LAZY_GLOBAL: Option<&'static str> = Some("ReadableStream");
+
     fn new(ctx: &Ctx<'js>) -> Result<Self>
     where
         Self: Sized,

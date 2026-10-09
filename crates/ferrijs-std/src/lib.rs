@@ -45,6 +45,9 @@ pub mod exceptions;
 pub mod fs;
 pub mod identity;
 pub mod json;
+/// Globals installed on first touch, for the standard library's own
+/// groups and for a host's.
+pub mod lazy;
 pub mod modules;
 pub mod navigator;
 /// Node modules this crate implements itself, because upstream llrt has
@@ -99,5 +102,94 @@ pub fn init(ctx: &Ctx<'_>) -> Result<()> {
   url::init(ctx)?;
   web::init(ctx)?;
   navigator::init(ctx)?;
+  Ok(())
+}
+
+/// One group of globals [`init_lazy`] defers: the names it defines and
+/// the install that defines them.
+pub struct LazyGroup {
+  pub names: &'static [&'static str],
+  pub install: fn(&Ctx<'_>) -> Result<()>,
+}
+
+/// The groups [`init_lazy`] leaves behind accessors, with the globals
+/// each one defines. Every name a group's install puts on `globalThis`
+/// is listed, or a script could read it before the install that makes
+/// it; a test pins each list against what the install actually defines.
+pub const LAZY_GROUPS: &[LazyGroup] = &[
+  LazyGroup {
+    names: &[
+      "ByteLengthQueuingStrategy",
+      "CountQueuingStrategy",
+      "ReadableByteStreamController",
+      "ReadableStream",
+      "ReadableStreamBYOBReader",
+      "ReadableStreamBYOBRequest",
+      "ReadableStreamDefaultController",
+      "ReadableStreamDefaultReader",
+      "WritableStream",
+      "WritableStreamDefaultController",
+      "WritableStreamDefaultWriter",
+      "TransformStream",
+      "TransformStreamDefaultController",
+    ],
+    install: stream_web::init,
+  },
+  LazyGroup {
+    names: &["Buffer", "Blob", "File"],
+    install: buffer::init,
+  },
+  LazyGroup {
+    names: &["Crypto", "SubtleCrypto", "CryptoKey", "crypto"],
+    install: crypto::init,
+  },
+  LazyGroup {
+    names: &["TextEncoder", "TextDecoder", "TextEncoderStream", "TextDecoderStream"],
+    install: text::init,
+  },
+  LazyGroup {
+    names: &["URLSearchParams", "URL"],
+    install: url::init,
+  },
+  LazyGroup {
+    names: &["PerformanceEntry", "PerformanceMark", "PerformanceMeasure", "Performance", "performance"],
+    install: web::performance::init,
+  },
+  LazyGroup {
+    names: &["FormData"],
+    install: web::init_form_data,
+  },
+  LazyGroup {
+    names: &["CompressionStream", "DecompressionStream"],
+    install: web::compression::install,
+  },
+];
+
+/// [`init`], with the heavier globals behind [`lazy`] accessors: the
+/// streams, `Buffer` / `Blob` / `File`, `crypto`, the text codecs, `URL`,
+/// `performance`, `FormData` and the compression streams install on
+/// first read. `DOMException`, the events, abort, `atob` / `btoa`,
+/// `structuredClone` and `navigator` install now, since every other group
+/// leans on them or they cost next to nothing.
+///
+/// A realm built this way ends up with the same globals as [`init`]
+/// gives it once each has been read; a test holds the two to that.
+///
+/// # Errors
+///
+/// Propagates the installs and the accessor definitions.
+pub fn init_lazy(ctx: &Ctx<'_>) -> Result<()> {
+  exceptions::init(ctx)?;
+  events::init(ctx)?;
+  abort::init(ctx)?;
+  web::init_base(ctx)?;
+  navigator::init(ctx)?;
+  // Every primordial a lazy group makes, reserved while nothing can be
+  // holding a userdata borrow: see `utils::primordials::Reserved`.
+  stream_web::reserve_primordials(ctx)?;
+  buffer::reserve_primordials(ctx);
+  for group in LAZY_GROUPS {
+    lazy::define(ctx, group.names, group.install)?;
+  }
   Ok(())
 }

@@ -102,6 +102,9 @@ impl FormDataJs {
         content_type,
         filename,
       } => {
+        // A `File` is a `Blob` only once the buffer group has chained the
+        // two prototypes, and nothing here reads the `File` global.
+        crate::lazy::ensure(ctx, "File")?;
         let file = Class::instance(
           ctx.clone(),
           crate::buffer::File::from_bytes(

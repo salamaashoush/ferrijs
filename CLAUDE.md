@@ -48,7 +48,7 @@ Dependency flow: cli -> bundle -> ferrijs -> std -> permissions; ferrijs
   re-sync is a diff. Every deviation is a numbered local delta in its
   README. No `cargo fmt` there (its own `rustfmt.toml` disables it).
   Our own code lives in `src/node/`, `src/web/`, `src/permissions.rs`,
-  `src/identity.rs`, `src/fs/guard.rs`.
+  `src/identity.rs`, `src/lazy.rs`, `src/fs/guard.rs`.
 - **The bundler reads the runtime's module table.** A `Bundler` is
   built over the same `ModuleRegistry` the realm is, so what stays
   external at bundle time is what the realm serves at link time.

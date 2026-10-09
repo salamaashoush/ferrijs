@@ -27,6 +27,19 @@ use rquickjs::{Class, Ctx, Filter, Object, TypedArray, Value};
 ///
 /// Propagates the global writes.
 pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  init_base(ctx)?;
+  performance::init(ctx)?;
+  init_form_data(ctx)?;
+  compression::install(ctx)
+}
+
+/// `atob`, `btoa` and `structuredClone`: the part of [`init`] that is
+/// three functions, which a lazy realm installs eagerly.
+///
+/// # Errors
+///
+/// Propagates the global writes.
+pub fn init_base(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
   // btoa/atob over a Latin1 "binary string", per the WHATWG contract.
@@ -65,13 +78,16 @@ pub fn init(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   )?;
 
   globals.set("structuredClone", Func::from(structured_clone))?;
-
-  performance::init(ctx)?;
-
-  rquickjs::Class::<form_data::FormDataJs>::define(&globals)?;
-  compression::install(ctx)?;
-
   Ok(())
+}
+
+/// The `FormData` constructor.
+///
+/// # Errors
+///
+/// Propagates the global write.
+pub fn init_form_data(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  rquickjs::Class::<form_data::FormDataJs>::define(&ctx.globals())
 }
 
 /// WHATWG "forgiving-base64 decode"

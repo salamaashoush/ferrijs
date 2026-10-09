@@ -1,11 +1,12 @@
-use std::any::type_name;
+use std::any::{type_name, Any};
+use std::cell::OnceCell;
+use std::ops::Deref;
 
 use rquickjs::{
     atom::PredefinedAtom, function::Constructor, runtime::UserDataGuard, Ctx, Exception, Function,
     JsLifetime, Object, Result,
 };
 
-use crate::utils::result::ResultExt;
 
 #[derive(JsLifetime)]
 pub struct BasePrimordials<'js> {
@@ -43,12 +44,59 @@ pub struct BasePrimordials<'js> {
     pub prototype_iterator: Object<'js>,
 }
 
+/// Local delta: storage for a primordial reserved before the primordial
+/// exists. rquickjs refuses to insert userdata while any userdata is
+/// borrowed, and a lazy group can install from deep inside code holding a
+/// primordial, so a realm built lazily reserves each such slot at build
+/// and the group's `init` fills it in place instead of inserting.
+pub struct Reserved<P>(OnceCell<P>);
+
+// SAFETY: `Reserved` only wraps `P`, so its lifetime is `P`'s, renamed.
+unsafe impl<'js, P: JsLifetime<'js>> JsLifetime<'js> for Reserved<P> {
+    type Changed<'to> = Reserved<P::Changed<'to>>;
+}
+
+/// A primordial, wherever it is stored. Local delta: this was a bare
+/// `UserDataGuard<P>` before [`Reserved`].
+pub enum PrimordialRef<'a, P> {
+    Stored(UserDataGuard<'a, P>),
+    Reserved(UserDataGuard<'a, Reserved<P>>),
+}
+
+impl<P> Deref for PrimordialRef<'_, P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        match self {
+            Self::Stored(guard) => guard,
+            Self::Reserved(guard) => guard
+                .0
+                .get()
+                .expect("a reserved primordial is only handed out once filled"),
+        }
+    }
+}
+
 pub trait Primordial<'js>
 where
     Self: Sized + JsLifetime<'js>,
+    Self::Changed<'static>: Any,
 {
-    fn get<'a>(ctx: &'a Ctx<'js>) -> Result<UserDataGuard<'a, Self>> {
-        let userdata = ctx.userdata::<Self>().or_throw_msg(
+    /// A global whose lazy group creates this primordial: a `get` that
+    /// finds it missing installs that group first. Local delta.
+    const LAZY_GLOBAL: Option<&'static str> = None;
+
+    fn get<'a>(ctx: &'a Ctx<'js>) -> Result<PrimordialRef<'a, Self>> {
+        if let Some(found) = Self::find(ctx) {
+            return Ok(found);
+        }
+        if let Some(name) = Self::LAZY_GLOBAL {
+            crate::lazy::ensure(ctx, name)?;
+            if let Some(found) = Self::find(ctx) {
+                return Ok(found);
+            }
+        }
+        Err(Exception::throw_message(
             ctx,
             &[
                 "Userdata of ",
@@ -56,17 +104,40 @@ where
                 " not initialized. Call init(&ctx) on this type.",
             ]
             .concat(),
-        )?;
+        ))
+    }
 
-        Ok(userdata)
+    /// Local delta: the stored or reserved-and-filled primordial, if any.
+    fn find<'a>(ctx: &'a Ctx<'js>) -> Option<PrimordialRef<'a, Self>> {
+        if let Some(stored) = ctx.userdata::<Self>() {
+            return Some(PrimordialRef::Stored(stored));
+        }
+        ctx.userdata::<Reserved<Self>>()
+            .filter(|reserved| reserved.0.get().is_some())
+            .map(PrimordialRef::Reserved)
+    }
+
+    /// Local delta: reserve this primordial's slot. Only at realm build,
+    /// before anything can hold a userdata borrow.
+    fn reserve(ctx: &Ctx<'js>) {
+        if ctx.userdata::<Self>().is_none() && ctx.userdata::<Reserved<Self>>().is_none() {
+            let _ = ctx.store_userdata(Reserved::<Self>(OnceCell::new()));
+        }
     }
 
     fn init<'a>(ctx: &'a Ctx<'js>) -> Result<()> {
-        if ctx.userdata::<Self>().is_none() {
-            let primoridals = Self::new(ctx)?;
-            let _ = ctx.store_userdata(primoridals);
+        if Self::find(ctx).is_some() {
+            return Ok(());
         }
-
+        let primordials = Self::new(ctx)?;
+        match ctx.userdata::<Reserved<Self>>() {
+            Some(reserved) => {
+                let _ = reserved.0.set(primordials);
+            },
+            None => {
+                let _ = ctx.store_userdata(primordials);
+            },
+        }
         Ok(())
     }
     fn new(ctx: &Ctx<'js>) -> Result<Self>;

@@ -25,6 +25,8 @@ pub struct BufferPrimordials<'js> {
 }
 
 impl<'js> Primordial<'js> for BufferPrimordials<'js> {
+    const LAZY_GLOBAL: Option<&'static str> = Some("Buffer");
+
     fn new(ctx: &Ctx<'js>) -> Result<Self>
     where
         Self: Sized,

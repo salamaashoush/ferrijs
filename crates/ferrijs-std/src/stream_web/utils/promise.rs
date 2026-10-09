@@ -73,6 +73,8 @@ impl<'js> Trace<'js> for PromisePrimordials<'js> {
 }
 
 impl<'js> Primordial<'js> for PromisePrimordials<'js> {
+    const LAZY_GLOBAL: Option<&'static str> = Some("ReadableStream");
+
     fn new(ctx: &Ctx<'js>) -> Result<Self>
     where
         Self: Sized,
