@@ -457,6 +457,72 @@ fn stored_handlers(c: &mut Criterion) {
   g.finish();
 }
 
+/// Throughput with every core busy, the shape of a parallel test runner
+/// or a mock server answering each request in a realm of its own. One
+/// iteration is 64 requests spread over every worker; the number that
+/// matters is how far it is from 64 times the serial cost divided by the
+/// core count, which is what shared state between realms costs.
+fn parallel(c: &mut Criterion) {
+  let rt = tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .build()
+    .expect("tokio runtime");
+  let mut g = c.benchmark_group("parallel");
+  g.sample_size(20);
+
+  g.bench_function("realm_per_request_64", |b| {
+    b.to_async(&rt).iter_custom(|iters| {
+      hosted(iters, || async {
+        let mut set = Vec::with_capacity(64);
+        for i in 0..64 {
+          set.push(tokio::spawn(async move {
+            let realm = plain().await;
+            ok(
+              realm
+                .eval_script("return args[0] + 1", &[serde_json::json!(i)], RunOptions::default())
+                .await,
+            )
+          }));
+        }
+        for h in set {
+          black_box(h.await.expect("join"));
+        }
+      })
+    });
+  });
+
+  let workers = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+  let realms: &'static [Runtime] = leak(rt.block_on(async {
+    let mut realms = Vec::with_capacity(workers);
+    for _ in 0..workers {
+      realms.push(plain().await);
+    }
+    realms
+  }));
+  g.bench_function("realm_per_worker_64", |b| {
+    b.to_async(&rt).iter_custom(|iters| {
+      hosted(iters, move || async move {
+        let mut set = Vec::with_capacity(64);
+        for i in 0..64 {
+          let realm = &realms[i % realms.len()];
+          set.push(tokio::spawn(async move {
+            ok(
+              realm
+                .eval_script("return args[0] + 1", &[serde_json::json!(i)], RunOptions::default())
+                .await,
+            )
+          }));
+        }
+        for h in set {
+          black_box(h.await.expect("join"));
+        }
+      })
+    });
+  });
+
+  g.finish();
+}
+
 criterion_group!(
   benches,
   startup,
@@ -467,6 +533,7 @@ criterion_group!(
   registry,
   sustained,
   script_working_set,
-  stored_handlers
+  stored_handlers,
+  parallel
 );
 criterion_main!(benches);
