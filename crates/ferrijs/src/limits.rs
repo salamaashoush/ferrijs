@@ -318,16 +318,91 @@ pub async fn run_within<F: std::future::Future>(
   limit: Duration,
   fut: F,
 ) -> Result<F::Output, Timedout> {
-  if clock.never_parks() {
-    // The deadline cannot move, so there is nothing for the loop below
-    // to re-derive: one timer, one select, no clock reads per pass.
-    return tokio::time::timeout(limit, fut).await.map_err(|_| Timedout);
+  Budget::start(clock, limit).run(fut).await
+}
+
+/// A [`run_within`] budget whose clock starts before the future is
+/// handed over, so the timer behind it can be started later without the
+/// wait before it going uncounted.
+pub(crate) struct Budget<'a> {
+  clock: &'a Arc<dyn PauseClock>,
+  limit: Duration,
+  started: Instant,
+  /// The clock counts the whole process, so only what it gains from the
+  /// start on belongs to this budget -- otherwise work that runs after a
+  /// long stop would inherit that stop's grace and never time out.
+  parked_before: Duration,
+}
+
+impl<'a> Budget<'a> {
+  pub(crate) fn start(clock: &'a Arc<dyn PauseClock>, limit: Duration) -> Self {
+    let never_parks = clock.never_parks();
+    Self {
+      clock,
+      limit,
+      started: Instant::now(),
+      parked_before: if never_parks {
+        Duration::ZERO
+      } else {
+        clock.parked_now()
+      },
+    }
   }
-  let started = Instant::now();
-  // The clock counts the whole process, so only what it gains from here
-  // on belongs to this call -- otherwise work that runs after a long
-  // stop would inherit that stop's grace and never time out.
-  let parked_before = clock.parked_now();
+
+  /// Drive `fut`, starting the timer only once `parked` is raised.
+  ///
+  /// A future that finishes without parking is never timed: the budget
+  /// exists for a run stuck on an await outside the VM, which only a
+  /// parked one can be, and a timer registration per run is a lock on
+  /// the runtime's timer wheel that every realm on it shares.
+  pub(crate) async fn run_once_parked<F: std::future::Future>(
+    self,
+    parked: &crate::vm::Parked,
+    fut: F,
+  ) -> Result<F::Output, Timedout> {
+    let mut fut = std::pin::pin!(fut);
+    let quick = std::future::poll_fn(|cx| {
+      if let std::task::Poll::Ready(out) = fut.as_mut().poll(cx) {
+        return std::task::Poll::Ready(Some(out));
+      }
+      if parked.poll_parked(cx) {
+        std::task::Poll::Ready(None)
+      } else {
+        std::task::Poll::Pending
+      }
+    })
+    .await;
+    match quick {
+      Some(out) => Ok(out),
+      None => self.run(fut).await,
+    }
+  }
+
+  async fn run<F: std::future::Future>(self, fut: F) -> Result<F::Output, Timedout> {
+    let Self {
+      clock,
+      limit,
+      started,
+      parked_before,
+    } = self;
+    if clock.never_parks() {
+      // The deadline cannot move, so there is nothing for the loop below
+      // to re-derive: one timer, one select, no clock reads per pass.
+      return tokio::time::timeout_at(tokio::time::Instant::from_std(started + limit), fut)
+        .await
+        .map_err(|_| Timedout);
+    }
+    run_until(clock, started, limit, parked_before, fut).await
+  }
+}
+
+async fn run_until<F: std::future::Future>(
+  clock: &Arc<dyn PauseClock>,
+  started: Instant,
+  limit: Duration,
+  parked_before: Duration,
+  fut: F,
+) -> Result<F::Output, Timedout> {
   let deadline_now = || started + limit + clock.parked_now().saturating_sub(parked_before);
   let mut fut = std::pin::pin!(fut);
   loop {

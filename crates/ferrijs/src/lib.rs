@@ -61,6 +61,7 @@ pub use extension::{Extension, FnExtension};
 pub use ferrijs_permissions::{self as permissions, Container, Denied, Permissions, SysInfo};
 pub use ferrijs_std as std;
 pub use ferrijs_std::identity::Identity;
+pub use ferrijs_std::lazy;
 pub use limits::{Deadline, Limits, PauseClock, RunOptions};
 pub use modules::{ModulePolicy, ModuleRegistry, NativeModule, RequireHook};
 pub use realm::RealmOptions;

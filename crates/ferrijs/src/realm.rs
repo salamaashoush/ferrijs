@@ -35,6 +35,16 @@ pub struct RealmOptions {
   /// coarsening it is what browsers and workerd do for code they do not
   /// trust. `None` leaves the clocks precise.
   pub clock_resolution: Option<std::time::Duration>,
+  /// Install the heavier standard-library globals (the streams, `Buffer`,
+  /// `crypto`, `URL`, the text codecs, `performance`, `FormData`) on
+  /// first read instead of at build: see [`ferrijs_std::init_lazy`]. A
+  /// realm that runs one short script pays only for what it touches.
+  ///
+  /// Off, everything installs at build, before any script runs. The
+  /// difference a script can see: until first read, each such global is
+  /// an accessor rather than a data property, and an install that runs
+  /// late sees whatever the script did to the realm by then.
+  pub lazy_globals: bool,
 }
 
 impl Default for RealmOptions {
@@ -44,6 +54,7 @@ impl Default for RealmOptions {
       freeze_intrinsics: false,
       remove_globals: Vec::new(),
       clock_resolution: None,
+      lazy_globals: true,
     }
   }
 }

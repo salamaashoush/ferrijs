@@ -24,7 +24,7 @@ use crate::console::{ConsoleCapture, ConsoleSink};
 use crate::console_fmt::{ConsoleSlot, install_console_slot};
 use crate::error::{ScriptError, ScriptErrorKind};
 use crate::extension::Extension;
-use crate::limits::{AppliedLimits, Deadline, Limits, NeverParked, PauseClock, RunOptions, TimeoutState, run_within};
+use crate::limits::{AppliedLimits, Budget, Deadline, Limits, NeverParked, PauseClock, RunOptions, TimeoutState};
 use crate::modules::{
   BoxLoader, BoxResolver, FileLoader, FileResolver, LoaderChain, ModulePolicy, ModuleRegistry, RequireHook,
   ResolverChain,
@@ -600,7 +600,12 @@ impl Runtime {
 
       let fail =
         |what: &str, e: rquickjs::Error| ScriptError::internal(format!("failed to install {what}: {}", thrown(&ctx, e)));
-      ferrijs_std::init(&ctx).map_err(|e| fail("the standard library", e))?;
+      if realm.lazy_globals {
+        ferrijs_std::init_lazy(&ctx)
+      } else {
+        ferrijs_std::init(&ctx)
+      }
+      .map_err(|e| fail("the standard library", e))?;
       if timers {
         crate::timers::install(&ctx).map_err(|e| fail("timers", e))?;
       }
@@ -637,6 +642,12 @@ impl Runtime {
         tracing::info!(target: "ferrijs::extensions", "{}", entry.message);
       }
 
+      // An eager realm is eager for an extension's lazy groups too, so
+      // the option means one thing: everything installed before any
+      // script runs.
+      if !realm.lazy_globals {
+        ferrijs_std::lazy::ensure_all(&ctx).map_err(|e| fail("the lazy globals", e))?;
+      }
       crate::realm::lockdown(&ctx, &realm).map_err(|e| fail("the realm lockdown", e))?;
       Ok(())
     })
@@ -794,10 +805,12 @@ impl Runtime {
       self.console_slot.retarget(Arc::clone(&console));
     }
 
-    let fut = vm_with!(reservation => |ctx| { body(ctx).await });
+    let parked = Arc::new(crate::vm::Parked::default());
+    let fut = crate::vm::vm_with_parked!(reservation, Arc::clone(&parked) => |ctx| { body(ctx).await });
 
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
-    let outcome = if let Ok(r) = run_within(self.timeout.clock(), backstop, fut).await {
+    let budget = Budget::start(self.timeout.clock(), backstop);
+    let outcome = if let Ok(r) = budget.run_once_parked(&parked, fut).await {
       r.and_then(|inner| inner)
     } else {
       guard.disarm();

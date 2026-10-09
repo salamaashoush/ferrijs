@@ -6,7 +6,9 @@
 //! were added, so one that depends on another's globals is added after
 //! it.
 //!
-//! Extensions install once, at realm creation. A host that must refresh
+//! Extensions install once, at realm creation. An extension with a
+//! large surface a script may never touch can put it behind
+//! [`crate::lazy::define`], so a realm pays for it on first use. A host that must refresh
 //! a global per run (a handle that changes between calls) does so in
 //! the body it hands to [`crate::Runtime::run`], where it has the
 //! context anyway.

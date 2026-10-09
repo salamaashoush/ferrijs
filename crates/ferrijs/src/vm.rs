@@ -26,8 +26,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::Poll;
+
+use futures::task::AtomicWaker;
 
 use rquickjs::{AsyncContext, Ctx};
 use tracing::Instrument;
@@ -88,8 +90,56 @@ impl VmHandle {
   }
 }
 
+/// Raised the first time a job's future parks: it returned `Pending`, so
+/// it waits on something outside the VM rather than running to the end
+/// in one poll. A caller that only needs to act on a parked job (start a
+/// timer, say) waits for this instead of paying for it on every job.
+#[derive(Default)]
+pub(crate) struct Parked {
+  parked: AtomicBool,
+  waker: AtomicWaker,
+}
+
+/// What a job does the first time it parks. `()` does nothing and
+/// compiles away, so a job nobody watches carries no hook at all.
+pub(crate) trait OnPark: Send + Sync + 'static {
+  fn raise(&self);
+}
+
+impl OnPark for () {
+  #[inline]
+  fn raise(&self) {}
+}
+
+impl OnPark for Arc<Parked> {
+  fn raise(&self) {
+    if !self.parked.swap(true, Ordering::AcqRel) {
+      self.waker.wake();
+    }
+  }
+}
+
+impl Parked {
+  /// Whether the job has parked, registering `cx` to hear when it does.
+  pub(crate) fn poll_parked(&self, cx: &mut std::task::Context<'_>) -> bool {
+    self.waker.register(cx.waker());
+    self.parked.load(Ordering::Acquire)
+  }
+}
+
 impl VmReservation<'_> {
-  pub(crate) async fn with<R, F>(self, f: F) -> Result<R, ScriptError>
+  /// Not `async`: handing back the inner future keeps a dispatch to one
+  /// state machine rather than one wrapped in another.
+  pub(crate) fn with<R, F>(self, f: F) -> impl Future<Output = Result<R, ScriptError>>
+  where
+    R: Send + 'static,
+    F: for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output = R> + Send + 'js>> + Send + 'static,
+  {
+    self.with_parked(f, ())
+  }
+
+  /// [`Self::with`], raising `parked` the first time the job parks.
+  pub(crate) async fn with_parked<R, F, P: OnPark>(self, f: F, parked: P) -> Result<R, ScriptError>
   where
     R: Send + 'static,
     F: for<'js> FnOnce(Ctx<'js>) -> Pin<Box<dyn Future<Output = R> + Send + 'js>> + Send + 'static,
@@ -112,6 +162,7 @@ impl VmReservation<'_> {
             if let Poll::Ready(result) = future.as_mut().poll(cx) {
               return Poll::Ready(Some(result));
             }
+            parked.raise();
             // Only parked jobs need a cancellation waker; synchronous
             // dispatch avoids registering and removing one per call.
             tx.poll_closed(cx).map(|()| None)
@@ -211,3 +262,28 @@ macro_rules! vm_with {
     })
   };
 }
+
+/// [`vm_with!`] on a reservation, raising a [`Parked`] when the job
+/// parks. Crate-internal: the run bracket is its one user.
+macro_rules! vm_with_parked {
+  ($reservation:expr, $parked:expr => |$ctx:ident| { $($t:tt)* }) => {
+    $reservation.with_parked(
+      move |$ctx| {
+        // SAFETY: the same argument as `vm_with!`, whose uplift this is.
+        #[allow(unsafe_code)]
+        unsafe fn uplift<'a, 'b, R>(
+          f: ::core::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = R> + 'a>>,
+        ) -> ::core::pin::Pin<::std::boxed::Box<dyn ::core::future::Future<Output = R> + 'b + ::core::marker::Send>> {
+          unsafe { ::core::mem::transmute(f) }
+        }
+        let fut = ::std::boxed::Box::pin(async move { $($t)* });
+        #[allow(unsafe_code)]
+        unsafe {
+          uplift(fut)
+        }
+      },
+      $parked,
+    )
+  };
+}
+pub(crate) use vm_with_parked;
