@@ -322,6 +322,45 @@ impl Builder {
   }
 }
 
+/// quickjs-ng's small-block size classes (`arena_block_sizes` in
+/// `quickjs.c`), each served from 4 KiB arenas behind an 8-byte header.
+const ARENA_BLOCK_SIZES: [usize; 31] = [
+  16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320,
+  352, 384, 416, 448, 480, 512,
+];
+
+/// One live block in every arena size class, for the realm's life.
+///
+/// quickjs-ng frees an arena as soon as its last block is freed. A run
+/// that allocates in a class nothing else in the realm uses therefore
+/// builds an arena, empties it, frees it, and the next run builds it
+/// again: measured at 1,700 to 6,000 instructions a run, depending on
+/// whether the allocator also hands the page back to the OS. Which class
+/// that is depends on what else the realm holds, so a realm that drops
+/// some unrelated object can start paying it. An `ArrayBuffer` copies its
+/// bytes into one engine block of exactly its length, so a buffer of the
+/// class size less the header keeps that class's arena alive. About
+/// 10 KiB a realm, plus an arena for any class nothing else was using.
+struct ArenaPins<'js>(#[allow(dead_code)] Vec<rquickjs::ArrayBuffer<'js>>);
+
+// SAFETY: the buffers belong to the context the userdata is stored on;
+// `Changed` only renames that lifetime.
+#[allow(unsafe_code)]
+unsafe impl<'js> rquickjs::JsLifetime<'js> for ArenaPins<'js> {
+  type Changed<'to> = ArenaPins<'to>;
+}
+
+fn pin_arena_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  const HEADER: usize = 8;
+  let zeros = [0u8; 512];
+  let pins = ARENA_BLOCK_SIZES
+    .iter()
+    .map(|size| rquickjs::ArrayBuffer::new_copy(ctx.clone(), &zeros[..size - HEADER]))
+    .collect::<rquickjs::Result<Vec<_>>>()?;
+  let _ = ctx.store_userdata(ArenaPins(pins));
+  Ok(())
+}
+
 /// The realm's event-loop handle, stashed as context userdata so a
 /// binding that needs to dispatch back into the VM from another task
 /// can find it.
@@ -622,6 +661,7 @@ impl Runtime {
       // `console.log` has somewhere to go; each run retargets it at its
       // own capture.
       install_console_slot(&ctx, &install_slot).map_err(|e| fail("console", e))?;
+      pin_arena_classes(&ctx).map_err(|e| fail("the arena pins", e))?;
 
       for extension in &extensions {
         extension
