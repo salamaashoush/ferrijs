@@ -180,9 +180,13 @@ fn set_timeout_interval<'js, P: CallbackPolicy>(
       let outer = nesting.swap(level, Ordering::Relaxed);
       let res: rquickjs::Result<()> = P::enter(cb.ctx(), policy.as_ref(), || cb.call_arg(call_args));
       nesting.store(outer, Ordering::Relaxed);
-      res
-        .inspect_err(|err| tracing::warn!(target: "ferrijs::timers", "timer callback threw: {err}"))
-        .is_ok()
+      match res {
+        Ok(()) => true,
+        Err(error) => {
+          crate::uncaught::report_error(cb.ctx(), &error);
+          false
+        },
+      }
     };
 
     if !is_interval {
@@ -261,11 +265,7 @@ fn set_immediate<'js, P: CallbackPolicy>(
   rest: Rest<Value<'js>>,
 ) -> rquickjs::Result<()> {
   match P::capture(&ctx) {
-    None => {
-      let mut args = rquickjs::function::Args::new(ctx, rest.0.len());
-      args.push_args(rest.0)?;
-      cb.defer_arg(args)
-    },
+    None => crate::uncaught::queue(&ctx, &cb, &rest.0),
     Some(policy) => {
       // The wrapper captures only the policy (plain data); the real
       // callback rides the deferred args (a native closure must never
@@ -274,7 +274,7 @@ fn set_immediate<'js, P: CallbackPolicy>(
       // `'js`.
       let policy = Some(policy);
       let wrapper = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
-        deferred_call::<P>(policy.as_ref(), &args.0)
+        deferred_call::<P>(policy.as_ref(), &args.0);
       })?;
       let mut args = rquickjs::function::Args::new(ctx, rest.0.len() + 1);
       args.push_arg(cb)?;
@@ -285,15 +285,19 @@ fn set_immediate<'js, P: CallbackPolicy>(
 }
 
 /// Call the deferred callback (args[0]) with the rest of the args, under
-/// `policy`.
-fn deferred_call<P: CallbackPolicy>(policy: Option<&P>, args: &[Value<'_>]) -> rquickjs::Result<()> {
-  let inner = args.first().and_then(|v| v.as_function().cloned()).ok_or_else(|| {
-    rquickjs::Error::new_from_js_message("setImmediate", "Error", "deferred callback missing".to_string())
-  })?;
+/// `policy`, reporting a throw.
+fn deferred_call<P: CallbackPolicy>(policy: Option<&P>, args: &[Value<'_>]) {
+  let Some(inner) = args.first().and_then(|v| v.as_function().cloned()) else {
+    return;
+  };
   let ctx = inner.ctx().clone();
   let mut call_args = rquickjs::function::Args::new(ctx.clone(), args.len().saturating_sub(1));
-  call_args.push_args(args.iter().skip(1).cloned())?;
-  P::enter(&ctx, policy, || inner.call_arg(call_args))
+  let called = call_args
+    .push_args(args.iter().skip(1).cloned())
+    .and_then(|()| P::enter(&ctx, policy, || inner.call_arg::<()>(call_args)));
+  if let Err(error) = called {
+    crate::uncaught::report_error(&ctx, &error);
+  }
 }
 
 /// WHATWG `queueMicrotask(cb)`. A named generic fn so `Ctx`, the
@@ -301,11 +305,11 @@ fn deferred_call<P: CallbackPolicy>(policy: Option<&P>, args: &[Value<'_>]) -> r
 /// give each its own lifetime).
 fn queue_microtask<'js, P: CallbackPolicy>(ctx: Ctx<'js>, cb: Function<'js>) -> rquickjs::Result<()> {
   match P::capture(&ctx) {
-    None => cb.defer::<()>(()),
+    None => crate::uncaught::queue(&ctx, &cb, &[]),
     Some(policy) => {
       let policy = Some(policy);
       let wrapper = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| {
-        deferred_call::<P>(policy.as_ref(), &args.0)
+        deferred_call::<P>(policy.as_ref(), &args.0);
       })?;
       wrapper.defer((cb,))
     },

@@ -67,6 +67,7 @@ pub mod stream_web;
 pub mod string_decoder;
 pub mod text;
 pub mod tty;
+pub mod uncaught;
 pub mod url;
 pub mod utils;
 pub mod zlib;

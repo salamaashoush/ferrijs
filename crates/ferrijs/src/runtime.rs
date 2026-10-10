@@ -118,6 +118,9 @@ pub struct Config {
   #[cfg(feature = "fetch")]
   pub fetch: Option<Arc<dyn crate::fetch::FetchBackend>>,
   pub extensions: Vec<Arc<dyn Extension>>,
+  /// Hears an uncaught exception that no run was there to fail. See
+  /// [`crate::uncaught`].
+  pub on_uncaught: Option<crate::uncaught::UncaughtHook>,
 }
 
 impl std::fmt::Debug for Config {
@@ -173,6 +176,7 @@ impl Default for Builder {
         #[cfg(feature = "fetch")]
         fetch: Some(Arc::new(crate::fetch::Client::new())),
         extensions: Vec::new(),
+        on_uncaught: None,
       },
       modules: None,
     }
@@ -303,6 +307,14 @@ impl Builder {
   #[must_use]
   pub fn extension_arc(mut self, extension: Arc<dyn Extension>) -> Self {
     self.config.extensions.push(extension);
+    self
+  }
+
+  /// Hear an uncaught exception (a throwing timer or queued callback)
+  /// that no run was there to fail. During a run the
+  /// first one fails the run instead. Without a hook these are logged.
+  pub fn on_uncaught(mut self, hook: impl Fn(ScriptError) + Send + Sync + 'static) -> Self {
+    self.config.on_uncaught = Some(Arc::new(hook));
     self
   }
 
@@ -476,6 +488,8 @@ pub struct Runtime {
   /// The realm's one `console`, built once. A run points it at its own
   /// capture rather than rebuilding two dozen native closures.
   console_slot: Arc<ConsoleSlot>,
+  /// Where the realm's uncaught exceptions find the run in progress.
+  uncaught: Arc<crate::uncaught::Watch>,
 }
 
 struct RunGuard<'a> {
@@ -629,6 +643,11 @@ impl Runtime {
     let fetch_backend = config.fetch.clone();
     let realm = config.realm.clone();
     let extensions = config.extensions.clone();
+    let uncaught = Arc::new(crate::uncaught::Watch::default());
+    let install_uncaught = Arc::clone(&uncaught);
+    let uncaught_timeout = Arc::clone(&timeout);
+    let on_uncaught = config.on_uncaught.clone();
+    let uncaught_redactor = config.redactor.clone();
 
     let installed: Result<Result<(), ScriptError>, ScriptError> = vm_with!(vm => |ctx| {
       let _ = ctx.store_userdata(VmHandleUd(ud_vm));
@@ -636,6 +655,7 @@ impl Runtime {
       ferrijs_std::permissions::install(&ctx, permissions);
       ferrijs_std::identity::set(&ctx, identity);
       crate::script_cache::install(&ctx, script_cache);
+      crate::uncaught::install(&ctx, install_uncaught, uncaught_timeout, on_uncaught, uncaught_redactor);
 
       let fail =
         |what: &str, e: rquickjs::Error| ScriptError::internal(format!("failed to install {what}: {}", thrown(&ctx, e)));
@@ -706,6 +726,7 @@ impl Runtime {
       poisoned: AtomicBool::new(false),
       base_console: kept_console,
       console_slot,
+      uncaught,
     })
   }
 
@@ -780,13 +801,18 @@ impl Runtime {
   /// Push resource limits to the engine, skipping any setter whose
   /// value is unchanged since the last run.
   async fn apply_limits(&self, memory: usize, stack: usize, gc: usize) {
-    if self.applied.memory.swap(memory, Ordering::Relaxed) != memory {
+    // Loads first: a run almost always asks for what the last one did,
+    // and a load is cheaper than the swap that records a change.
+    if self.applied.memory.load(Ordering::Relaxed) != memory {
+      self.applied.memory.store(memory, Ordering::Relaxed);
       self.engine.set_memory_limit(memory).await;
     }
-    if self.applied.stack.swap(stack, Ordering::Relaxed) != stack {
+    if self.applied.stack.load(Ordering::Relaxed) != stack {
+      self.applied.stack.store(stack, Ordering::Relaxed);
       self.engine.set_max_stack_size(stack).await;
     }
-    if self.applied.gc.swap(gc, Ordering::Relaxed) != gc {
+    if self.applied.gc.load(Ordering::Relaxed) != gc {
+      self.applied.gc.store(gc, Ordering::Relaxed);
       self.engine.set_gc_threshold(gc).await;
     }
   }
@@ -847,13 +873,25 @@ impl Runtime {
     }
 
     let parked = Arc::new(crate::vm::Parked::default());
-    let fut = crate::vm::vm_with_parked!(reservation, Arc::clone(&parked) => |ctx| { body(ctx).await });
+    let watch = Arc::clone(&self.uncaught);
+    let fut = crate::vm::vm_with_parked!(reservation, Arc::clone(&parked) => |ctx| {
+      crate::uncaught::guard(watch, body(ctx)).await
+    });
 
     let backstop = timeout.saturating_add(self.config.limits.backstop_grace);
     let budget = Budget::starting_at(self.timeout.clock(), backstop, started);
+    crate::uncaught::begin(&self.uncaught);
     let outcome = if let Ok(r) = budget.run_once_parked(&parked, fut).await {
-      r.and_then(|inner| inner)
+      let outcome = r.and_then(|inner| inner);
+      if crate::uncaught::end(&self.uncaught)
+        && let Some(error) = self.uncaught.take()
+      {
+        Err(error)
+      } else {
+        outcome
+      }
     } else {
+      crate::uncaught::end(&self.uncaught);
       guard.disarm();
       return self.finish_backstop(started, &console, timeout);
     };

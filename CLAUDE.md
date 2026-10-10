@@ -48,7 +48,7 @@ Dependency flow: cli -> bundle -> ferrijs -> std -> permissions; ferrijs
   re-sync is a diff. Every deviation is a numbered local delta in its
   README. No `cargo fmt` there (its own `rustfmt.toml` disables it).
   Our own code lives in `src/node/`, `src/web/`, `src/permissions.rs`,
-  `src/identity.rs`, `src/lazy.rs`, `src/fs/guard.rs`. `js/readable-stream`
+  `src/identity.rs`, `src/lazy.rs`, `src/uncaught.rs`, `src/fs/guard.rs`. `js/readable-stream`
   is vendored unmodified (`node:stream`); see its `VENDORED.md`.
 - **The bundler reads the runtime's module table.** A `Bundler` is
   built over the same `ModuleRegistry` the realm is, so what stays

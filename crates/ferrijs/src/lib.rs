@@ -55,6 +55,7 @@ pub mod script_cache;
 pub mod source_map;
 pub mod timers;
 mod to_json;
+pub mod uncaught;
 pub mod value;
 pub mod vm;
 
@@ -77,4 +78,5 @@ pub use runtime::{
   script_body, vm_handle,
 };
 pub use source_map::{CompiledModule, LazyMap, SourceMapper};
+pub use uncaught::UncaughtHook;
 pub use vm::VmHandle;

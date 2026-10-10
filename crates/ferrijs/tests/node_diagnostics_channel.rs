@@ -52,15 +52,31 @@ async fn import_and_require_share_one_instance() {
 
 #[tokio::test]
 async fn a_throwing_subscriber_reaches_neither_the_publisher_nor_the_others() {
-  let out = module(
-    "import { channel } from 'node:diagnostics_channel';
-     const seen = [];
-     const ch = channel('throws');
-     ch.subscribe(() => { throw new Error('subscriber'); });
-     ch.subscribe((data) => seen.push(data));
-     ch.publish('after the throw');
-     export default seen;",
-  )
-  .await;
-  assert_eq!(out, serde_json::json!(["after the throw"]));
+  // Node reports the subscriber's throw on the next tick as uncaught,
+  // which fails the run; the publisher and the other subscribers carry
+  // on first.
+  let realm = Runtime::builder().build().await.expect("runtime");
+  let run = realm
+    .eval_module_source(
+      "entry.mjs",
+      "import { channel } from 'node:diagnostics_channel';
+       globalThis.seen = [];
+       const ch = channel('throws');
+       ch.subscribe(() => { throw new Error('subscriber'); });
+       ch.subscribe((data) => seen.push(data));
+       ch.publish('after the throw');
+       globalThis.published = true;",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(run.result.unwrap_err().message, "subscriber");
+  let after = realm
+    .eval_script(
+      "return [globalThis.seen, globalThis.published]",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(after.result.unwrap(), serde_json::json!([["after the throw"], true]));
 }
