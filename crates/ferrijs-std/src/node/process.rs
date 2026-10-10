@@ -240,6 +240,9 @@ pub fn install(ctx: &Ctx<'_>, options: &ProcessOptions) -> rquickjs::Result<()> 
   p.set("permission", permission)?;
 
   g.set("process", p)?;
+  // Node's own name for the global object, which older libraries and
+  // polyfills (`setimmediate`, `util.inherits`-era code) still read.
+  g.set("global", g.clone())?;
   Ok(())
 }
 

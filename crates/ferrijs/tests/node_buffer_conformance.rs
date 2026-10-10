@@ -59,3 +59,17 @@ async fn isatty_of_a_non_descriptor_is_false() {
     .await;
   assert_eq!(run.result.unwrap(), serde_json::json!([false, false, false, false]));
 }
+
+#[tokio::test]
+async fn global_is_the_global_object() {
+  let realm = Runtime::builder().build().await.expect("runtime");
+  let run = realm
+    .eval_script(
+      "const d = Object.getOwnPropertyDescriptor(globalThis, 'global');
+       return [global === globalThis, d.writable, d.enumerable, d.configurable];",
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(run.result.unwrap(), serde_json::json!([true, true, true, true]));
+}
