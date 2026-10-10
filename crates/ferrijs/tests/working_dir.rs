@@ -21,9 +21,14 @@ fn the_default_root_follows_a_chdir_and_a_rename() {
   std::env::set_current_dir(&first).unwrap();
   assert_eq!(root(), std::fs::canonicalize(&first).unwrap());
 
-  let renamed = scratch.path().join("renamed");
-  std::fs::rename(&first, &renamed).unwrap();
-  assert_eq!(root(), std::fs::canonicalize(&renamed).unwrap());
+  // Windows refuses to rename the directory a process is in, and only
+  // the Unix path remembers anything a rename could make stale.
+  #[cfg(unix)]
+  {
+    let renamed = scratch.path().join("renamed");
+    std::fs::rename(&first, &renamed).unwrap();
+    assert_eq!(root(), std::fs::canonicalize(&renamed).unwrap());
+  }
 
   std::env::set_current_dir(&start).unwrap();
   assert_eq!(root(), std::fs::canonicalize(&start).unwrap());
