@@ -404,7 +404,14 @@ pub(super) fn ed25519_private(seed: &[u8]) -> KeyResult<Material> {
   if seed.len() != 32 {
     return Err(malformed("an Ed25519 private key"));
   }
-  let public = CRYPTO_PROVIDER.ed25519_public_key(seed).map_err(from_provider)?;
+  let pkcs8 = der::sequence(&[
+    &der::tlv(der::INTEGER, &[0]),
+    &der::sequence(&[&der::tlv(der::OID, ED25519)]),
+    &der::tlv(der::OCTET_STRING, &der::tlv(der::OCTET_STRING, seed)),
+  ]);
+  let public = CRYPTO_PROVIDER
+    .export_okp_public_key_raw(&pkcs8, true)
+    .map_err(from_provider)?;
   Ok(Material::Ed25519 {
     public,
     seed: Some(seed.to_vec()),

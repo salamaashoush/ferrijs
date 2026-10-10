@@ -681,7 +681,8 @@ the extension that needs it.
     `crypto.verify`, `generateKeyPair(Sync)`, `timingSafeEqual`,
     `constants` and a `createHmac` that takes a `KeyObject`. The
     provider's own limits apply: RSA-PSS at the digest-length salt only,
-    ECDSA under its curve's hash only, no RSA with SHA-1. `rust/mod.rs`
-    gains `ed25519_public_key` for keys read without their public half.
+    ECDSA under its curve's hash only, no RSA with SHA-1. In
+    `rust/mod.rs`, `export_okp_public_key_raw` derives a private Ed25519
+    key's point on the Edwards curve; it derived every key as X25519.
     `crates/ferrijs/tests/node_crypto_keys.rs` holds every encoding and
     deterministic signature to what Node 24 prints for fixed keys.

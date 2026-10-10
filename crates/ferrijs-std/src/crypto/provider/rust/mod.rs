@@ -602,17 +602,6 @@ impl HmacProvider for RustHmac {
 #[derive(Default)]
 pub struct RustCryptoProvider;
 
-impl RustCryptoProvider {
-    /// The Ed25519 public key for a 32-byte seed. `node:crypto` reads
-    /// private keys that carry no public key (PKCS#8 v1, JWK `d` alone)
-    /// and has to derive it.
-    pub fn ed25519_public_key(&self, seed: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let key = LcEd25519KeyPair::from_seed_unchecked(seed)
-            .map_err(|_| CryptoError::InvalidKey(None))?;
-        Ok(key.public_key().as_ref().to_vec())
-    }
-}
-
 impl CryptoProvider for RustCryptoProvider {
     type Digest = RustDigest;
     type Hmac = RustHmac;
@@ -1268,18 +1257,16 @@ impl CryptoProvider for RustCryptoProvider {
         is_private: bool,
     ) -> Result<Vec<u8>, CryptoError> {
         if is_private {
-            // Extract public key from PKCS8 - for X25519/Ed25519
-            use der::Decode;
-            let pk_info = pkcs8::PrivateKeyInfoRef::from_der(key_data)
+            // A private Ed25519 key is the PKCS#8 this provider stores and
+            // derives its point on the Edwards curve; a private X25519 key
+            // is the raw scalar, on the Montgomery one. Deriving both as
+            // X25519 gave an Ed25519 key a public key it does not have.
+            if key_data.len() == 32 {
+                return x25519_public_from_raw(key_data);
+            }
+            let key = LcEd25519KeyPair::from_pkcs8(key_data)
                 .map_err(|_| CryptoError::InvalidKey(None))?;
-            // The private key is wrapped in an OCTET STRING, skip the tag+length (2 bytes)
-            let private_key_bytes = pk_info.private_key.as_bytes();
-            let seed = if private_key_bytes.len() > 2 && private_key_bytes[0] == 0x04 {
-                &private_key_bytes[2..]
-            } else {
-                private_key_bytes
-            };
-            x25519_public_from_raw(seed)
+            Ok(key.public_key().as_ref().to_vec())
         } else {
             Ok(key_data.to_vec())
         }
