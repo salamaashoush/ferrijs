@@ -104,6 +104,10 @@ An extension registers native modules (served to `import` and
 host with per-run globals installs them in the body it hands to
 `Runtime::run`, which runs under the same bracket as `eval_script`.
 
+[docs/EMBEDDING.md](docs/EMBEDDING.md) covers the rest of the host API:
+state kept in the realm, callbacks and event pumps, errors, value
+conversions and bundles.
+
 ## Building
 
 Stable Rust, pinned in `rust-toolchain.toml`. `just ready` is the gate:
