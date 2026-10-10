@@ -1096,6 +1096,7 @@ dependencies = [
 name = "ferrijs-bundle"
 version = "0.7.0"
 dependencies = [
+ "dunce",
  "ferrijs",
  "rolldown",
  "rolldown_common",

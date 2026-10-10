@@ -29,6 +29,9 @@ rolldown_plugin = "=1.2.13"
 # elides the label spans, so the file and line a parse error points at
 # are only reachable through `to_diagnostic()`.
 rolldown_error = "=1.2.13"
+# `canonicalize` answers `\\?\C:\...` on Windows, which rolldown resolves
+# as no module at all.
+dunce = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 rustc-hash = { workspace = true }

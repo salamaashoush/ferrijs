@@ -383,6 +383,12 @@ impl Bundler {
     if entry_paths.is_empty() {
       return Err(ScriptError::internal("no entry files".to_string()));
     }
+    // A path a host canonicalized is `\\?\C:\...` on Windows, and rolldown
+    // reports that entry as unresolved. The same path without the prefix
+    // names the same file; elsewhere this changes nothing.
+    let entry_paths: Vec<PathBuf> = entry_paths.iter().map(|p| dunce::simplified(p).to_path_buf()).collect();
+    let entry_paths = entry_paths.as_slice();
+    let cwd = dunce::simplified(cwd);
 
     let env = Arc::clone(&self.options);
     if let Some(ts) = &env.tsconfig
