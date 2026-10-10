@@ -37,17 +37,29 @@ pub fn throw_named<'js>(ctx: &Ctx<'js>, name: &str, message: impl Into<String>) 
   }
 }
 
-/// Throw Node's coded error: a real `TypeError` or `RangeError` with
-/// `code` set, as `internal/errors` makes them.
-pub(crate) fn coded(ctx: &Ctx<'_>, kind: &str, code: &str, message: &str) -> rquickjs::Error {
+/// Throw a real error of the built-in class `kind` (`TypeError`,
+/// `RangeError`, `Error`, ...) carrying the whole of `message`, with
+/// `code` set when there is one, as Node's `internal/errors` makes them.
+///
+/// `rquickjs::Error::new_from_js_message` is not a substitute: it formats
+/// through `QuickJS`'s 256-byte buffer, so a longer message is cut, and
+/// every message reads "Error converting from js ...".
+pub fn throw_error(ctx: &Ctx<'_>, kind: &str, code: Option<&str>, message: &str) -> rquickjs::Error {
   let built = (|| -> rquickjs::Result<Value<'_>> {
     let ctor: rquickjs::function::Constructor<'_> = ctx.globals().get(kind)?;
     let error: Object<'_> = ctor.construct((message,))?;
-    error.set("code", code)?;
+    if let Some(code) = code {
+      error.set("code", code)?;
+    }
     Ok(error.into_value())
   })();
   match built {
     Ok(error) => ctx.throw(error),
     Err(error) => error,
   }
+}
+
+/// [`throw_error`] with Node's `code`.
+pub(crate) fn coded(ctx: &Ctx<'_>, kind: &str, code: &str, message: &str) -> rquickjs::Error {
+  throw_error(ctx, kind, Some(code), message)
 }

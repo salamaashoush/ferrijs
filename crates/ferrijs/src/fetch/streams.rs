@@ -89,7 +89,7 @@ pub fn to_byte_stream<'js>(ctx: &Ctx<'js>, stream: Class<'js, ReadableStream<'js
       .clone()
       .into_value()
       .into_object()
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("fetch", "TypeError", "body is not a ReadableStream"))?;
+      .ok_or_else(|| crate::value::type_error(ctx, "body is not a ReadableStream"))?;
     obj
       .get::<_, rquickjs::Function<'js>>("getReader")?
       .call::<_, rquickjs::Object<'js>>((rquickjs::function::This(obj),))?

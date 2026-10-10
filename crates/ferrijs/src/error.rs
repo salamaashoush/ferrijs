@@ -265,6 +265,37 @@ impl From<rquickjs::Error> for ScriptError {
   }
 }
 
+/// A failure from rquickjs as a [`ScriptError`], for a host body that
+/// returns one: `func.call(args).or_script_error(&ctx)?`.
+pub trait JsResultExt<T> {
+  /// A thrown value becomes a runtime error with its name, message and
+  /// stack (remapped through any bundle registered in the realm); any
+  /// other failure, an internal one.
+  ///
+  /// # Errors
+  ///
+  /// The converted failure.
+  fn or_script_error(self, ctx: &rquickjs::Ctx<'_>) -> Result<T, ScriptError>;
+}
+
+impl<T> JsResultExt<T> for rquickjs::Result<T> {
+  fn or_script_error(self, ctx: &rquickjs::Ctx<'_>) -> Result<T, ScriptError> {
+    self.map_err(|error| {
+      if error.is_exception() {
+        ScriptError::from_caught(ctx, rquickjs::CaughtError::from_error(ctx, error), "")
+      } else {
+        ScriptError::internal(error.to_string())
+      }
+    })
+  }
+}
+
+impl<T> JsResultExt<T> for rquickjs::CaughtResult<'_, T> {
+  fn or_script_error(self, ctx: &rquickjs::Ctx<'_>) -> Result<T, ScriptError> {
+    self.map_err(|caught| ScriptError::from_caught(ctx, caught, ""))
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::snippet_around_line;

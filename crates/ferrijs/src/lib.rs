@@ -60,7 +60,7 @@ pub mod value;
 pub mod vm;
 
 pub use console::{ConsoleCapture, ConsoleSink};
-pub use error::{ScriptError, ScriptErrorKind};
+pub use error::{JsResultExt, ScriptError, ScriptErrorKind};
 pub use extension::{Extension, FnExtension};
 pub use ferrijs_permissions::{self as permissions, Container, Denied, Permissions, SysInfo};
 pub use ferrijs_std as std;

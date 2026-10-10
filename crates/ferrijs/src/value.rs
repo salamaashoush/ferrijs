@@ -12,6 +12,56 @@ use serde::de::DeserializeOwned;
 /// mangled "Error converting from js ..." message and a fixed name.
 pub use ferrijs_std::node::throw_named;
 
+/// Throw a real error of a built-in class (`TypeError`, `RangeError`,
+/// ...) carrying the whole message, with a Node-style `code` when there
+/// is one. See [`type_error`] for why not `new_from_js_message`.
+pub use ferrijs_std::node::throw_error;
+
+/// Throw a real `TypeError` carrying the whole message: the error for an
+/// argument a binding cannot use.
+///
+/// `rquickjs::Error::new_from_js_message` formats through `QuickJS`'s
+/// 256-byte buffer, so a longer message is cut, and every message reads
+/// "Error converting from js ...".
+pub fn type_error(ctx: &Ctx<'_>, message: impl AsRef<str>) -> rquickjs::Error {
+  throw_error(ctx, "TypeError", None, message.as_ref())
+}
+
+/// Throw a real `RangeError` carrying the whole message.
+pub fn range_error(ctx: &Ctx<'_>, message: impl AsRef<str>) -> rquickjs::Error {
+  throw_error(ctx, "RangeError", None, message.as_ref())
+}
+
+/// `value`, awaited when it is a promise; any other value as it is. For a
+/// host calling back into script: `settle(&ctx, func.call(args)?).await?`.
+///
+/// A rejection read here is marked handled first. rquickjs reads a
+/// settled promise without attaching a handler, so without this an
+/// already-rejected promise the host consumed would still count as
+/// unhandled.
+///
+/// # Errors
+///
+/// The rejection, as [`crate::JsResultExt::or_script_error`] makes it.
+pub async fn settle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Value<'js>, crate::ScriptError> {
+  use crate::error::JsResultExt as _;
+  let Some(promise) = value.as_promise().cloned() else {
+    return Ok(value);
+  };
+  if promise.state() == rquickjs::promise::PromiseState::Rejected {
+    let ignore = rquickjs::Function::new(ctx.clone(), || {}).or_script_error(ctx)?;
+    let then: rquickjs::Function<'js> = promise.get("then").or_script_error(ctx)?;
+    then
+      .call::<_, Value<'js>>((
+        rquickjs::function::This(promise.clone()),
+        Value::new_undefined(ctx.clone()),
+        ignore,
+      ))
+      .or_script_error(ctx)?;
+  }
+  promise.into_future::<Value<'js>>().await.or_script_error(ctx)
+}
+
 /// [`throw_named`] with the `stack` the thrower decided on, rather than
 /// the one the engine captured at the `Error` construction site: for a
 /// host that re-attributes a failure to the frame that asked for the
@@ -81,8 +131,7 @@ pub fn parse_timeout_number_or_bag<'js>(
 /// and no `serde_json::Value` middle allocation. Used for binding
 /// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  ferrijs_serde::to_value(ctx.clone(), value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
+  ferrijs_serde::to_value(ctx.clone(), value).map_err(|e| type_error(ctx, format!("cannot convert the value: {e}")))
 }
 
 /// Build a JS `Array<{ name, value }>` straight from name/value pairs
@@ -111,9 +160,8 @@ pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S
 /// cycle handling all hold (covered by the ferrijs-serde test suite),
 /// so the option-bag call sites keep their prior semantics without our
 /// own hand-rolled walker.
-pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  ferrijs_serde::from_value(value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
+  ferrijs_serde::from_value(value).map_err(|e| type_error(ctx, format!("invalid argument: {e}")))
 }
 
 /// Deserialize an optional JS option bag straight into an options

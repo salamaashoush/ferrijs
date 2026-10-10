@@ -272,6 +272,16 @@ macro_rules! vm_with {
   };
 }
 
+/// [`vm_with!`] for a body that itself answers `Result<T, ScriptError>`:
+/// the loop's failure and the body's are one `Result`. A future, awaited
+/// like `vm_with!`.
+#[macro_export]
+macro_rules! vm_try {
+  ($vm:expr => |$ctx:ident| { $($t:tt)* }) => {
+    async { $crate::vm_with!($vm => |$ctx| { $($t)* }).await.and_then(|inner| inner) }
+  };
+}
+
 /// [`vm_with!`] on a reservation, raising a [`Parked`] when the job
 /// parks. Crate-internal: the run bracket is its one user.
 macro_rules! vm_with_parked {

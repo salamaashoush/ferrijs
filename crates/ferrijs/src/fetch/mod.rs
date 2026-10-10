@@ -572,7 +572,7 @@ impl<'js> FetchResponseJs<'js> {
     let obj = stream
       .into_value()
       .into_object()
-      .ok_or_else(|| rquickjs::Error::new_from_js_message("Response", "TypeError", "body is not a ReadableStream"))?;
+      .ok_or_else(|| crate::value::type_error(ctx, "body is not a ReadableStream"))?;
     let reader: Object<'js> = obj.get::<_, rquickjs::Function<'js>>("getReader")?.call((This(obj),))?;
     let read: rquickjs::Function<'js> = reader.get("read")?;
     let mut out = Vec::new();
@@ -691,7 +691,7 @@ pub(crate) trait BodyMixin<'js> {
   async fn mixin_json(&mut self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let b = self.consume_body(ctx).await?;
     let v: serde_json::Value =
-      serde_json::from_slice(&b).map_err(|e| rquickjs::Error::new_from_js_message("json", "Error", e.to_string()))?;
+      serde_json::from_slice(&b).map_err(|e| crate::value::throw_error(ctx, "SyntaxError", None, &e.to_string()))?;
     json_to_js(ctx, &v)
   }
 
@@ -1561,11 +1561,7 @@ fn do_fetch<'js>(
       if let Some(sig) = &signal
         && sig.is_aborted()
       {
-        return Err(rquickjs::Error::new_from_js_message(
-          "fetch",
-          "AbortError",
-          sig.reason_message(),
-        ));
+        return Err(abort_error(&failure_ctx, sig.reason_message()));
       }
       // Streamed: status/headers resolve here, the body is pulled
       // incrementally later (via Response.body / text() / json()).
@@ -1613,13 +1609,24 @@ fn do_fetch<'js>(
   }
 }
 
+/// The realm's own `DOMException` named `AbortError`. Not
+/// `Exception::throw_dom`, which builds the engine's intrinsic one, and
+/// the realm is made without it.
+fn abort_error(ctx: &Ctx<'_>, message: String) -> rquickjs::Error {
+  use ferrijs_std::exceptions::{DOMException, DOMExceptionName};
+  match DOMException::new_with_name(ctx, DOMExceptionName::AbortError, message).and_then(|e| e.into_js(ctx)) {
+    Ok(error) => ctx.throw(error),
+    Err(error) => error,
+  }
+}
+
 /// An engine failure on its way to JS: a permission refusal stays the
 /// `PermissionDeniedError` it is, an abort is an `AbortError`, and
 /// anything else is the WHATWG `TypeError`.
 fn fetch_failure(ctx: &Ctx<'_>, error: ferrijs_fetch::FetchError) -> rquickjs::Error {
   match error {
     ferrijs_fetch::FetchError::Denied(denied) => ferrijs_std::permissions::throw_denied(ctx, &denied),
-    ferrijs_fetch::FetchError::Abort(reason) => rquickjs::Error::new_from_js_message("fetch", "AbortError", reason),
-    other => rquickjs::Error::new_from_js_message("fetch", "TypeError", other.to_string()),
+    ferrijs_fetch::FetchError::Abort(reason) => abort_error(ctx, reason),
+    other => crate::value::type_error(ctx, other.to_string()),
   }
 }
