@@ -135,3 +135,31 @@ async fn fetch_failures_are_the_classes_the_spec_names() {
     serde_json::json!([["AbortError", true], ["TypeError", true], ["SyntaxError", true]])
   );
 }
+
+#[tokio::test]
+async fn bytes_come_out_of_every_byte_shaped_value() {
+  let realm = Runtime::builder().build().await.expect("runtime");
+  let vm = realm.handle();
+  let out = vm_try!(vm => |ctx| {
+    let mut seen = Vec::new();
+    for source in [
+      "new Uint8Array([1, 2, 3])",
+      "new Uint8Array([0, 1, 2, 3]).subarray(1)",
+      "new Uint8Array([1, 2, 3]).buffer",
+      "Buffer.from([1, 2, 3])",
+      "new DataView(new Uint8Array([1, 2, 3]).buffer)",
+    ] {
+      let value: Value<'_> = ctx.eval(source).or_script_error(&ctx)?;
+      seen.push(ferrijs::value::buffer_source_bytes(&ctx, &value).or_script_error(&ctx)?);
+    }
+    let text: Value<'_> = ctx.eval("'AQID'").or_script_error(&ctx)?;
+    seen.push(ferrijs::value::value_to_bytes(&ctx, &text, Some("base64")).or_script_error(&ctx)?);
+    let refused: Value<'_> = ctx.eval("({})").or_script_error(&ctx)?;
+    let refused = ferrijs::value::buffer_source_bytes(&ctx, &refused).or_script_error(&ctx).unwrap_err();
+    Ok::<_, ferrijs::ScriptError>((seen, refused.name))
+  })
+  .await
+  .unwrap();
+  assert!(out.0.iter().all(|bytes| bytes == &[1, 2, 3]), "{:?}", out.0);
+  assert_eq!(out.1.as_deref(), Some("TypeError"));
+}

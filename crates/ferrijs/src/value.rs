@@ -6,6 +6,14 @@ use rquickjs::{Ctx, Object, Value};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// The bytes behind a script value, copied out: a `BufferSource` (an
+/// `ArrayBuffer` or any view over one, `Buffer` included) with
+/// [`buffer_source_bytes`], and also a string in a `Buffer` encoding or
+/// an array of byte values with [`value_to_bytes`]. A copy, so script
+/// may run while the host holds the result, which a borrowed view does
+/// not allow.
+pub use ferrijs_std::node::bytes::{buffer_source_bytes, value_to_bytes};
+
 /// Throw a real JS `Error` with `name` set explicitly, so a script's
 /// `e.name === 'TimeoutError'` holds. `Error::new_from_js_message`
 /// cannot do this: it surfaces in scripts as a `TypeError` with a
