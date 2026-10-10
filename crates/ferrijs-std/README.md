@@ -85,6 +85,7 @@ implementation of each surface:
 | `node::process` | A sandbox-safe `process` — inert identity and timing, with `env` and `cwd()` supplied by the host — and its module form |
 | `node::timers` | The module form of `web::timers`, plus `timers/promises` |
 | `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
+| `node::crypto` | `node:crypto`: the vendored hashing and random members plus `KeyObject`, `createSign` / `createVerify`, `crypto.sign` / `crypto.verify`, key generation and `timingSafeEqual`, over the WebCrypto provider |
 | `node::diagnostics_channel` | `node:diagnostics_channel`, Node 24's implementation adapted to run without Node's internals; llrt has none |
 | `node::bytes` | The one JS-value-to-`Vec<u8>` walk: `BufferSource`, `Buffer`, byte arrays, encoded strings. `crypto`, the compression streams, `Buffer.from` and `setInputFiles` all read through it — there were three separate walks before |
 
@@ -668,3 +669,19 @@ the extension that needs it.
     builds the per-realm constructor. Node's leak warning past the limit
     is not, for want of a process warning channel.
 
+47. **`node:crypto` is served by `node/crypto` (ours), over this crate's
+    provider.** Upstream's `crypto` module has hashing and random numbers
+    only, so jsonwebtoken failed at `instanceof KeyObject`. `crypto/mod.rs`
+    makes `hash`, `subtle`, `provider` and `CRYPTO_PROVIDER` `pub(crate)`
+    so the Node API can sign with the provider `crypto.subtle` uses; no
+    other line there changes. `modules.rs` serves `node/crypto`'s
+    `CryptoModule`, which evaluates upstream's under a private name and
+    adds `KeyObject` (secret, RSA, EC P-256/384/521, Ed25519 keys in
+    PEM, DER and JWK), `createSign` / `createVerify`, `crypto.sign` /
+    `crypto.verify`, `generateKeyPair(Sync)`, `timingSafeEqual`,
+    `constants` and a `createHmac` that takes a `KeyObject`. The
+    provider's own limits apply: RSA-PSS at the digest-length salt only,
+    ECDSA under its curve's hash only, no RSA with SHA-1. `rust/mod.rs`
+    gains `ed25519_public_key` for keys read without their public half.
+    `crates/ferrijs/tests/node_crypto_keys.rs` holds every encoding and
+    deterministic signature to what Node 24 prints for fixed keys.

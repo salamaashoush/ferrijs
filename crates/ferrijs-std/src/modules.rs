@@ -86,34 +86,7 @@ impl ModuleDef for PathModule {
 /// `import { createHash } from 'node:crypto'` — the vendored llrt crypto
 /// module. `require('crypto')` reads the same members off the `crypto`
 /// global the runtime installs.
-pub use crate::crypto::CryptoModule;
-
-const CRYPTO_MEMBERS: &[&str] = &[
-  "createHash",
-  "createHmac",
-  "getRandomValues",
-  "randomBytes",
-  "randomFill",
-  "randomFillSync",
-  "randomInt",
-  "randomUUID",
-  "subtle",
-  "webcrypto",
-];
-
-fn crypto_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let global: Object<'js> = ctx.globals().get("crypto")?;
-  let ns = Object::new(ctx.clone())?;
-  for name in CRYPTO_MEMBERS {
-    if let Ok(value) = global.get::<_, Value<'js>>(*name) {
-      if !value.is_undefined() {
-        ns.set(*name, value)?;
-      }
-    }
-  }
-  ns.set("webcrypto", global)?;
-  Ok(ns)
-}
+pub use crate::node::crypto::CryptoModule;
 
 /// `import { Buffer } from 'node:buffer'` — the vendored llrt `Buffer`,
 /// which subclasses `Uint8Array`.
@@ -471,8 +444,8 @@ pub fn modules() -> Vec<NodeModule> {
     },
     NodeModule {
       specifiers: &["crypto", "node:crypto"],
-      declare: declare_fn::<crate::crypto::CryptoModule>(),
-      namespace: crypto_namespace,
+      declare: declare_fn::<crate::node::crypto::CryptoModule>(),
+      namespace: crate::node::crypto::namespace,
     },
     NodeModule {
       specifiers: &["zlib", "node:zlib"],

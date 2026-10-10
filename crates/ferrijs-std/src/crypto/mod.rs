@@ -21,10 +21,10 @@ compile_error!("Features `crypto-openssl` and `crypto-graviola` are mutually exc
 compile_error!("Features `crypto-ring` and `crypto-graviola` are mutually exclusive");
 
 mod crc32;
-mod hash;
-mod subtle;
+pub(crate) mod hash;
+pub(crate) mod subtle;
 
-mod provider;
+pub(crate) mod provider;
 
 use std::slice;
 
@@ -62,7 +62,7 @@ use self::{
     hash::{Hash, HashAlgorithm, Hmac},
 };
 
-static CRYPTO_PROVIDER: Lazy<provider::DefaultProvider> =
+pub(crate) static CRYPTO_PROVIDER: Lazy<provider::DefaultProvider> =
     Lazy::new(|| provider::DefaultProvider {});
 
 fn encoded_bytes<'js>(ctx: &Ctx<'js>, bytes: &[u8], encoding: &str) -> Result<Option<Value<'js>>> {

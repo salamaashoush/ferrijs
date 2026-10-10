@@ -602,6 +602,17 @@ impl HmacProvider for RustHmac {
 #[derive(Default)]
 pub struct RustCryptoProvider;
 
+impl RustCryptoProvider {
+    /// The Ed25519 public key for a 32-byte seed. `node:crypto` reads
+    /// private keys that carry no public key (PKCS#8 v1, JWK `d` alone)
+    /// and has to derive it.
+    pub fn ed25519_public_key(&self, seed: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let key = LcEd25519KeyPair::from_seed_unchecked(seed)
+            .map_err(|_| CryptoError::InvalidKey(None))?;
+        Ok(key.public_key().as_ref().to_vec())
+    }
+}
+
 impl CryptoProvider for RustCryptoProvider {
     type Digest = RustDigest;
     type Hmac = RustHmac;
