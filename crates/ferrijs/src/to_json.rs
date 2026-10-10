@@ -4,8 +4,10 @@
 //! `value::JsonValue` visitor gives, step for step: the same property
 //! reads in the same order, the same `toJSON` / `valueOf` / `toString`
 //! calls with the same arguments, the same skips, the same cycle check
-//! and the same exceptions left pending on a failure. A test runs both
-//! over a corpus and requires the same result.
+//! and the same exceptions left pending on a failure. One difference is
+//! deliberate: it never looks a method up on `null` or `undefined`, which
+//! left a stray `TypeError` pending after a successful conversion. A test
+//! runs both over a corpus and requires the same result otherwise.
 //!
 //! What it saves is everything around that: every `rquickjs::Value`
 //! re-counts its context on the way in and out, and serde's visitor
@@ -132,7 +134,14 @@ impl Walker {
 
   /// `value[atom]` when it is a function; anything else, a throw
   /// included, is no method (the throw stays pending, as it did).
+  ///
+  /// `null` and `undefined` have no properties to look up. `ferrijs-serde`
+  /// looked anyway and left the engine's `TypeError` pending in the
+  /// context after a conversion that succeeded; this walk does not.
   unsafe fn method(&self, value: qjs::JSValue, atom: PredefinedAtom) -> Option<Owned> {
+    if matches!(tag(value), qjs::JS_TAG_NULL | qjs::JS_TAG_UNDEFINED) {
+      return None;
+    }
     let found = Owned {
       ctx: self.ctx,
       value: unsafe { qjs::JS_GetProperty(self.ctx, value, atom as qjs::JSAtom) },
@@ -583,13 +592,19 @@ mod tests {
     } else {
       crate::value::value_to_json_via_serde(value)
     };
-    let pending = ctx.catch().as_exception().map(|e| {
-      format!(
-        "{}: {}",
-        e.get::<_, String>("name").unwrap_or_default(),
-        e.message().unwrap_or_default()
-      )
-    });
+    let pending = ctx
+      .catch()
+      .as_exception()
+      .map(|e| {
+        format!(
+          "{}: {}",
+          e.get::<_, String>("name").unwrap_or_default(),
+          e.message().unwrap_or_default()
+        )
+      })
+      // The reference's stray throw from looking `toJSON` up on
+      // `undefined` or `null`, which the direct walk no longer makes.
+      .filter(|message| !message.starts_with("TypeError: cannot read property 'toJSON' of "));
     let log: rquickjs::Value<'_> = ctx.globals().get("log").unwrap();
     let log = crate::value::value_to_json_via_serde(log);
     // Converting the log can itself leave a TypeError pending (both
@@ -597,6 +612,19 @@ mod tests {
     // neither case.
     let _ = ctx.catch();
     serde_json::json!({ "json": json, "pending": pending, "log": log })
+  }
+
+  #[test]
+  fn a_successful_conversion_leaves_nothing_pending() {
+    let runtime = Runtime::new().unwrap();
+    let context = Context::full(&runtime).unwrap();
+    context.with(|ctx| {
+      for expression in ["[undefined, null]", "({ a: [undefined], b: null })", "[1, , 3]"] {
+        let value: rquickjs::Value<'_> = ctx.eval(format!("({expression})")).unwrap();
+        assert!(super::convert(&ctx, &value).is_some(), "{expression}");
+        assert!(!ctx.catch().is_exception(), "{expression} left an exception pending");
+      }
+    });
   }
 
   #[test]
