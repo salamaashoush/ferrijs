@@ -30,6 +30,11 @@ impl Bundled {
     let module = Module::declare(ctx.clone(), self.name, self.source)?;
     let bytes = module.write(WriteOptions {
       endianness: WriteOptionsEndianness::Native,
+      // A realm reads back every byte it loads, and the source text and
+      // line tables are a tenth of what `node:crypto`'s loading costs.
+      // Stacks through these modules keep their function names.
+      strip_source: true,
+      strip_debug: true,
       ..WriteOptions::default()
     })?;
     Ok(self.bytecode.get_or_init(|| bytes))
