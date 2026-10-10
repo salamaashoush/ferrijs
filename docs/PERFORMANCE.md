@@ -289,6 +289,31 @@ covers. That is why `DOMException` and the fetch classes still install
 at build: deferring them saved realm build time and cost object-heavy
 scripts more.
 
+The rest of that 17% is the same arena behaviour on runs that need
+more than one arena per class: each one is built and freed every run,
+and what mimalloc charges for the page under it depends on what else
+the realm holds. With mimalloc purging immediately
+(`MIMALLOC_PURGE_DELAY=0`) the 1,000-object script costs 23% more.
+`patches/rquickjs-sys-0.14.0-keep-empty-arenas.patch` keeps an emptied
+arena on a list of its own, while empties are fewer than the arenas in
+use, and releases them on a GC or a failed allocation; the allocation
+fast path is untouched. quickjs-ng's own tests and test262 fail the
+same 52 cases with and without it. Against the published engine, on
+the workloads in the table above:
+
+| Workload | Published | Patched | Patched, `DOMException` and fetch lazy |
+| --- | ---: | ---: | ---: |
+| Build a default realm | 1,918,926 | 1,895,869 | 1,652,808 |
+| Script returning its object argument | 25,770 | 25,730 | 25,877 |
+| Script with one `await` | 27,439 | 27,429 | 27,472 |
+| 1,000 `{ id, name, ok, score }` pushed to an array | 4,207,330 | 4,157,098 | 4,158,539 |
+| `json_to_js`, 1,000 rows | 3,858,871 | 3,810,062 | 3,829,771 |
+| `json_to_js` then `value_to_json`, 1,000 rows | 10,321,785 | 10,275,881 | 10,300,439 |
+
+Deferring both is then a 14% cheaper realm for 0.4% more on a script
+that converts its argument. It waits on the patch reaching a published
+engine, since a `paths` override reaches no one who installs ferrijs.
+
 For many scripts from the command line, `ferrijs batch` runs each file
 in a realm of its own inside one process. On 196 small files it took
 9 ms, against 928 ms for one `ferrijs run` per file.

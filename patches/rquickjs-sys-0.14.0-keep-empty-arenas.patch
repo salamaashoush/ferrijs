@@ -1,0 +1,157 @@
+--- a/quickjs/quickjs.c
++++ b/quickjs/quickjs.c
+@@ -310,6 +310,11 @@
+ typedef struct JSArenaState {
+     struct list_head arena_list[JS_ARENA_BLOCK_SIZE_COUNT];
+     struct list_head free_arena_list[JS_ARENA_BLOCK_SIZE_COUNT];
++    /* arenas whose last block was freed, kept for reuse while they are
++       fewer than the arenas in use; js_arena_trim() releases them */
++    struct list_head empty_arena_list[JS_ARENA_BLOCK_SIZE_COUNT];
++    size_t n_arenas;
++    size_t n_empty_arenas;
+     _Alignas(JS_ARENA_ALIGN) uint8_t zero_size_block[sizeof(JSMallocBlockHeader)];
+ } JSArenaState;
+ 
+@@ -1739,6 +1744,7 @@
+     for (i = 0; i < JS_ARENA_BLOCK_SIZE_COUNT; i++) {
+         init_list_head(&s->arena_list[i]);
+         init_list_head(&s->free_arena_list[i]);
++        init_list_head(&s->empty_arena_list[i]);
+     }
+ }
+ 
+@@ -1774,7 +1780,71 @@
+     b->block_size_idx = block_size_idx;
+     list_add(&ar->link, &rt->arena_state.arena_list[block_size_idx]);
+     list_add(&ar->free_link, &rt->arena_state.free_arena_list[block_size_idx]);
++    rt->arena_state.n_arenas++;
++    return ar;
++}
++
++/* release every empty arena kept for reuse; returns whether any was */
++static bool js_arena_trim(JSRuntime *rt)
++{
++    JSArenaState *s = &rt->arena_state;
++    struct list_head *el, *el1;
++    int i;
++
++    if (s->n_empty_arenas == 0)
++        return false;
++    for (i = 0; i < JS_ARENA_BLOCK_SIZE_COUNT; i++) {
++        list_for_each_safe(el, el1, &s->empty_arena_list[i]) {
++            JSArena *ar = list_entry(el, JSArena, free_link);
++            list_del(&ar->link);
++            rt->mf.js_free(rt->malloc_state.opaque, ar);
++        }
++        init_list_head(&s->empty_arena_list[i]);
++    }
++    s->n_arenas -= s->n_empty_arenas;
++    s->n_empty_arenas = 0;
++    return true;
++}
++
++/* an arena for a size class with no free block: a kept empty one, else a
++   new one */
++static no_inline JSArena *arena_refill(JSRuntime *rt, int block_size_idx)
++{
++    JSArenaState *s = &rt->arena_state;
++    struct list_head *empty = &s->empty_arena_list[block_size_idx];
++    JSArena *ar;
++
++    if (empty->next != empty) {
++        ar = list_entry(empty->next, JSArena, free_link);
++        list_del(&ar->free_link);
++        list_add(&ar->free_link, &s->free_arena_list[block_size_idx]);
++        s->n_empty_arenas--;
++        return ar;
++    }
++    ar = arena_new(rt, block_size_idx);
++    if (!ar && js_arena_trim(rt))
++        ar = arena_new(rt, block_size_idx);
+     return ar;
++}
++
++/* Freeing an arena the moment it empties makes a run that allocates past
++   what the realm holds map and unmap arenas every time, and how much the
++   backing allocator then charges depends on unrelated realm contents. An
++   empty arena is kept while empties are fewer than the arenas in use. */
++static no_inline void arena_emptied(JSRuntime *rt, JSArena *ar,
++                                    int block_size_idx)
++{
++    JSArenaState *s = &rt->arena_state;
++
++    list_del(&ar->free_link);
++    if (s->n_empty_arenas * 2 < s->n_arenas) {
++        list_add(&ar->free_link, &s->empty_arena_list[block_size_idx]);
++        s->n_empty_arenas++;
++    } else {
++        list_del(&ar->link);
++        s->n_arenas--;
++        rt->mf.js_free(rt->malloc_state.opaque, ar);
++    }
+ }
+ 
+ static no_inline void *arena_malloc_large(JSRuntime *rt, size_t size)
+@@ -1782,6 +1852,9 @@
+     JSMallocBlockHeader *b;
+     b = rt->mf.js_malloc(rt->malloc_state.opaque,
+                          sizeof(JSMallocBlockHeader) + size);
++    if (!b && js_arena_trim(rt))
++        b = rt->mf.js_malloc(rt->malloc_state.opaque,
++                         sizeof(JSMallocBlockHeader) + size);
+     if (!b)
+         return NULL;
+     b->u.block_idx = JS_ARENA_FREE_NIL;
+@@ -1794,6 +1867,9 @@
+     JSMallocBlockHeader *b;
+     b = rt->mf.js_calloc(rt->malloc_state.opaque, 1,
+                          sizeof(JSMallocBlockHeader) + size);
++    if (!b && js_arena_trim(rt))
++        b = rt->mf.js_calloc(rt->malloc_state.opaque, 1,
++                         sizeof(JSMallocBlockHeader) + size);
+     if (!b)
+         return NULL;
+     b->u.block_idx = JS_ARENA_FREE_NIL;
+@@ -1821,7 +1897,7 @@
+         head = &rt->arena_state.free_arena_list[block_size_idx];
+         el = head->next;
+         if (unlikely(el == head)) {
+-            ar = arena_new(rt, block_size_idx);
++            ar = arena_refill(rt, block_size_idx);
+             if (!ar)
+                 return NULL;
+         } else {
+@@ -1867,11 +1943,8 @@
+             list_add(&ar->free_link,
+                      &rt->arena_state.free_arena_list[block_size_idx]);
+         ar->n_used_blocks--;
+-        if (unlikely(ar->n_used_blocks == 0)) {
+-            list_del(&ar->link);
+-            list_del(&ar->free_link);
+-            rt->mf.js_free(rt->malloc_state.opaque, ar);
+-        }
++        if (unlikely(ar->n_used_blocks == 0))
++            arena_emptied(rt, ar, block_size_idx);
+     }
+ }
+ 
+@@ -1975,7 +2048,10 @@
+         }
+         init_list_head(&s->arena_list[i]);
+         init_list_head(&s->free_arena_list[i]);
++        init_list_head(&s->empty_arena_list[i]);
+     }
++    s->n_arenas = 0;
++    s->n_empty_arenas = 0;
+ }
+ 
+ void *js_calloc_rt(JSRuntime *rt, size_t count, size_t size)
+@@ -7486,6 +7562,8 @@
+ 
+     /* free the GC objects in a cycle */
+     gc_free_cycles(rt);
++
++    js_arena_trim(rt);
+ }
+ 
+ /* Return false if not an object or if the object has already been
