@@ -148,35 +148,39 @@ impl VmReservation<'_> {
     let (mut tx, rx) = tokio::sync::oneshot::channel::<R>();
     let span = tracing::Span::current();
     let job: VmJob = Box::new(move |ctx| {
-      Box::pin(
-        async move {
-          let permit = permit;
-          if tx.is_closed() {
-            return;
-          }
-          let mut future = f(ctx);
-          let result = std::future::poll_fn(|cx| {
-            if tx.is_closed() {
-              return Poll::Ready(None);
-            }
-            if let Poll::Ready(result) = future.as_mut().poll(cx) {
-              return Poll::Ready(Some(result));
-            }
-            parked.raise();
-            // Only parked jobs need a cancellation waker; synchronous
-            // dispatch avoids registering and removing one per call.
-            tx.poll_closed(cx).map(|()| None)
-          })
-          .await;
-          drop(future);
-          // A reply may immediately submit another job on another thread.
-          drop(permit);
-          if let Some(result) = result {
-            let _ = tx.send(result);
-          }
+      let run = async move {
+        let permit = permit;
+        if tx.is_closed() {
+          return;
         }
-        .instrument(span),
-      )
+        let mut future = f(ctx);
+        let result = std::future::poll_fn(|cx| {
+          if tx.is_closed() {
+            return Poll::Ready(None);
+          }
+          if let Poll::Ready(result) = future.as_mut().poll(cx) {
+            return Poll::Ready(Some(result));
+          }
+          parked.raise();
+          // Only parked jobs need a cancellation waker; synchronous
+          // dispatch avoids registering and removing one per call.
+          tx.poll_closed(cx).map(|()| None)
+        })
+        .await;
+        drop(future);
+        // A reply may immediately submit another job on another thread.
+        drop(permit);
+        if let Some(result) = result {
+          let _ = tx.send(result);
+        }
+      };
+      // A job carries the caller's span into the VM loop, but entering
+      // and leaving a disabled one on every poll is pure cost.
+      if span.is_disabled() {
+        Box::pin(run)
+      } else {
+        Box::pin(run.instrument(span))
+      }
     });
     self
       .handle
@@ -216,6 +220,11 @@ pub(crate) fn spawn_vm_loop_with_capacity(ctx: &AsyncContext, capacity: usize) -
       .async_with(async |ctx| {
         loop {
           tokio::select! {
+            // Polled in order rather than from a random start: the order
+            // is no fairness question with a shutdown branch that fires
+            // once, and the random start costs a thread-local RNG draw on
+            // every job.
+            biased;
             job = rx.recv() => match job {
               Some(job) => ctx.spawn(job(ctx.clone())),
               None => break,
