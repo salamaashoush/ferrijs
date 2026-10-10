@@ -3,7 +3,12 @@
 # correcting it here would put noise in that diff, which is the same reason
 # the `Documentation` job excludes the crate.
 [files]
-extend-exclude = ["crates/ferrijs-std/"]
+extend-exclude = [
+  "crates/ferrijs-std/",
+  # Corpora run under Node and the answers recorded from it: key
+  # material, base64 and operand labels such as `ba`, not prose.
+  "crates/ferrijs/tests/fixtures/",
+]
 
 # `ser` is a real module (`crates/ferrijs-serde/src/ser.rs`), the serde
 # convention for a serializer, not a misspelling of "set".

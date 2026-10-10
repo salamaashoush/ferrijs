@@ -288,9 +288,9 @@ pub(crate) fn f64_as_exact_i32(n: f64) -> Option<i32> {
 /// The rules are `ferrijs-serde`'s: it invokes `toJSON()` / `valueOf()`
 /// (a returned `Date` still serialises as its ISO string), coerces whole
 /// f64 in the safe-integer range to `i64`, drops `undefined` / function /
-/// symbol, and renders non-finite as null. The walk itself is
-/// [`crate::to_json`], which answers what that deserializer would without
-/// its per-value overhead.
+/// symbol, and renders non-finite as null. The walk itself is this
+/// crate's own, which answers what that deserializer would without its
+/// per-value overhead.
 #[must_use]
 pub fn value_to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
   crate::to_json::convert(ctx, &value)
