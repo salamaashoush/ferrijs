@@ -11,7 +11,7 @@ pub mod registry;
 pub mod require;
 
 pub use file::{FileLoader, FileResolver, ModulePolicy};
-pub use registry::{DeclareFn, ModuleRegistry, NamespaceFn, NativeLoader, NativeModule, NativeResolver};
+pub use registry::{DeclareFn, ModuleRegistry, NamespaceFn, NativeLoader, NativeModule, NativeResolver, ObjectModule};
 pub use require::RequireHook;
 
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};

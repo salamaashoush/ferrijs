@@ -83,6 +83,81 @@ impl NativeModule {
   }
 }
 
+/// A module whose exports are the members of one object: its named
+/// exports, its `default`, and what `require` answers. Built once per
+/// realm, so `import` and `require` see the same values.
+///
+/// ```ignore
+/// struct Acme;
+/// impl ObjectModule for Acme {
+///   const EXPORTS: &'static [&'static str] = &["greet"];
+///   fn build<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> { /* ... */ }
+/// }
+/// registry.register(NativeModule::from_object::<Acme>(["acme"]))?;
+/// ```
+pub trait ObjectModule: 'static {
+  /// The members exported by name, besides `default`.
+  const EXPORTS: &'static [&'static str];
+
+  /// The object, the first time a realm asks for the module.
+  ///
+  /// # Errors
+  ///
+  /// Whatever building it raised.
+  fn build<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>>;
+}
+
+/// A realm's built object for `T`.
+struct Built<'js, T>(Object<'js>, std::marker::PhantomData<fn() -> T>);
+
+// SAFETY: `T` only names the module; the one JS value is the `'js`
+// object, restated with the lifetime as `JsLifetime` requires.
+#[allow(unsafe_code)]
+unsafe impl<'js, T: 'static> rquickjs::JsLifetime<'js> for Built<'js, T> {
+  type Changed<'to> = Built<'to, T>;
+}
+
+fn built<'js, T: ObjectModule>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  if let Some(found) = ctx.userdata::<Built<'js, T>>() {
+    return Ok(found.0.clone());
+  }
+  let object = T::build(ctx)?;
+  let _ = ctx.store_userdata(Built::<'js, T>(object.clone(), std::marker::PhantomData));
+  Ok(object)
+}
+
+struct ObjectModuleDef<T>(std::marker::PhantomData<T>);
+
+impl<T: ObjectModule> ModuleDef for ObjectModuleDef<T> {
+  fn declare(declare: &rquickjs::module::Declarations<'_>) -> rquickjs::Result<()> {
+    for name in T::EXPORTS {
+      declare.declare(*name)?;
+    }
+    declare.declare("default")?;
+    Ok(())
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+    let object = built::<T>(ctx)?;
+    for name in T::EXPORTS {
+      exports.export(*name, object.get::<_, rquickjs::Value<'js>>(*name)?)?;
+    }
+    exports.export("default", object)?;
+    Ok(())
+  }
+}
+
+impl NativeModule {
+  /// The module an [`ObjectModule`] describes, under `specifiers`.
+  pub fn from_object<T: ObjectModule>(specifiers: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    Self {
+      specifiers: specifiers.into_iter().map(Into::into).collect(),
+      declare: Arc::new(|ctx, name| Module::declare_def::<ObjectModuleDef<T>, _>(ctx, name)),
+      namespace: Arc::new(|ctx| built::<T>(ctx)),
+    }
+  }
+}
+
 impl From<ferrijs_std::modules::NodeModule> for NativeModule {
   fn from(m: ferrijs_std::modules::NodeModule) -> Self {
     Self {

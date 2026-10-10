@@ -181,3 +181,52 @@ fn source_kind_heuristics() {
     "const m = await import('y');\nreturn m;"
   ));
 }
+
+#[tokio::test]
+async fn a_host_body_evaluates_a_bundle_and_names_failures_in_the_source() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("handler.ts"),
+    "export const ready: string = 'yes';\n\nexport function fail(): never {\n  throw new Error('from the handler');\n}\n",
+  )
+  .expect("write");
+  let compiled = Arc::new(
+    bundler(BytecodeCache::disabled())
+      .compile(&[dir.path().join("handler.ts")], dir.path(), "handler.js")
+      .await
+      .expect("compile"),
+  );
+  let rt = Runtime::builder().build().await.expect("runtime");
+
+  let module = Arc::clone(&compiled);
+  let run = rt
+    .run(
+      RunOptions::default(),
+      Box::new(move |ctx| {
+        Box::pin(async move {
+          use ferrijs::JsResultExt as _;
+          let namespace = module.evaluate(&ctx).await?.namespace().or_script_error(&ctx)?;
+          let ready: String = namespace.get("ready").or_script_error(&ctx)?;
+          let fail: ferrijs::rquickjs::Function<'_> = namespace.get("fail").or_script_error(&ctx)?;
+          fail.call::<_, ()>(()).or_script_error(&ctx)?;
+          Ok(ready)
+        })
+      }),
+    )
+    .await;
+  let error = compiled.remap_error(run.result.unwrap_err());
+  assert!(error.message.starts_with("from the handler (at "), "{}", error.message);
+  assert!(error.message.contains("handler.ts:4:"), "{}", error.message);
+}
+
+#[test]
+fn the_cache_location_comes_from_the_environment() {
+  let base = tempfile::tempdir().expect("tempdir");
+  let dir = base.path().as_os_str().to_owned();
+  let cache = BytecodeCache::from_lookup("acme-app", |name| (name == "ACME_APP_CACHE_DIR").then(|| dir.clone()));
+  assert!(cache.dir().unwrap().starts_with(base.path().join("acme-app")));
+  let off = BytecodeCache::from_lookup("acme-app", |name| {
+    (name == "ACME_APP_NO_BYTECODE_CACHE" || name == "ACME_APP_CACHE_DIR").then(|| dir.clone())
+  });
+  assert!(!off.is_enabled());
+}

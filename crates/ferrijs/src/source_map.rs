@@ -164,6 +164,36 @@ impl CompiledModule {
   pub fn remap(&self, line: u32, col: u32) -> Option<(String, u32, u32)> {
     self.mapper().remap(line, col)
   }
+
+  /// Register this module's source map on the realm and evaluate it, for
+  /// a host body that does more in the same run (drain what the module
+  /// registered, read its exports). [`crate::Runtime::eval_module`] is
+  /// the whole run.
+  ///
+  /// # Errors
+  ///
+  /// A load, link or evaluation failure, labelled with the module name.
+  pub async fn evaluate<'js>(
+    &self,
+    ctx: &Ctx<'js>,
+  ) -> Result<rquickjs::Module<'js, rquickjs::module::Evaluated>, crate::ScriptError> {
+    register_bundle(ctx, self.mapper());
+    crate::runtime::eval_bytecode(ctx, &self.bytecode, &self.module_name).await
+  }
+
+  /// `error` with its primary position named in the original source:
+  /// ` (at src/file.ts:12:5)` after the message, when this module's map
+  /// has the position. The stack is already mapped when it was caught in
+  /// a realm the module was registered on.
+  #[must_use]
+  pub fn remap_error(&self, mut error: crate::ScriptError) -> crate::ScriptError {
+    if let Some(line) = error.line
+      && let Some((source, line, column)) = self.remap(line, error.column.unwrap_or(1))
+    {
+      error.message = format!("{} (at {source}:{line}:{column})", error.message);
+    }
+    error
+  }
 }
 
 impl std::fmt::Debug for CompiledModule {

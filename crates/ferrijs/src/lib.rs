@@ -68,7 +68,7 @@ pub use ferrijs_std as std;
 pub use ferrijs_std::identity::Identity;
 pub use ferrijs_std::lazy;
 pub use limits::{Deadline, Limits, PauseClock, RunOptions};
-pub use modules::{ModulePolicy, ModuleRegistry, NativeModule, RequireHook};
+pub use modules::{ModulePolicy, ModuleRegistry, NativeModule, ObjectModule, RequireHook};
 pub use pool::RealmPool;
 pub use realm::RealmOptions;
 pub use redact::{Redactor, Secrets};

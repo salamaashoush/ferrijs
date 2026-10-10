@@ -86,6 +86,27 @@ impl BytecodeCache {
     Self::at(base)
   }
 
+  /// [`Self::for_app`] under the environment's say: none when
+  /// `<APP>_NO_BYTECODE_CACHE` is set, `$<APP>_CACHE_DIR/<app>` when that
+  /// is, where `<APP>` is `app` upper-cased with `-` as `_`.
+  #[must_use]
+  pub fn from_env(app: &str) -> Self {
+    Self::from_lookup(app, |name| std::env::var_os(name))
+  }
+
+  /// [`Self::from_env`] reading the variables through `lookup`.
+  #[must_use]
+  pub fn from_lookup(app: &str, lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
+    let prefix = app.to_ascii_uppercase().replace('-', "_");
+    if lookup(&format!("{prefix}_NO_BYTECODE_CACHE")).is_some() {
+      return Self::disabled();
+    }
+    match lookup(&format!("{prefix}_CACHE_DIR")) {
+      Some(dir) => Self::at(PathBuf::from(dir).join(app)),
+      None => Self::for_app(app),
+    }
+  }
+
   #[must_use]
   pub fn is_enabled(&self) -> bool {
     self.dir.is_some()
