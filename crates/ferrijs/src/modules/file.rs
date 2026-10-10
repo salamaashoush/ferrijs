@@ -106,8 +106,44 @@ impl ModulePolicy {
 
 impl Default for ModulePolicy {
   fn default() -> Self {
-    Self::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    Self::new(working_dir())
   }
+}
+
+/// The working directory.
+///
+/// `getcwd` costs about 9 µs on macOS, and a host that builds a realm per
+/// request with the default policy would pay it every time. The answer is
+/// remembered with the identity of the directory it named, and reused
+/// while the path still names the directory the process is in: a `chdir`
+/// or a rename of the directory is seen as `getcwd` would see it.
+#[cfg(unix)]
+fn working_dir() -> PathBuf {
+  use std::os::unix::fs::MetadataExt as _;
+  use std::sync::{Mutex, PoisonError};
+
+  static LAST: Mutex<Option<(PathBuf, u64, u64)>> = Mutex::new(None);
+
+  let Ok(here) = std::fs::metadata(".") else {
+    return PathBuf::from(".");
+  };
+  let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+  if let Some((path, dev, ino)) = last.as_ref()
+    && (*dev, *ino) == (here.dev(), here.ino())
+    && std::fs::metadata(path).is_ok_and(|named| (named.dev(), named.ino()) == (*dev, *ino))
+  {
+    return path.clone();
+  }
+  let Ok(path) = std::env::current_dir() else {
+    return PathBuf::from(".");
+  };
+  *last = Some((path.clone(), here.dev(), here.ino()));
+  path
+}
+
+#[cfg(not(unix))]
+fn working_dir() -> PathBuf {
+  std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Resolves relative ES module specifiers to absolute paths.
