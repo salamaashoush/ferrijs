@@ -1,5 +1,6 @@
 //! Conversions between Rust values and `rquickjs` values.
 
+#[cfg(test)]
 use rquickjs::object::Property;
 use rquickjs::{Ctx, Object, Value};
 use serde::Serialize;
@@ -139,6 +140,7 @@ pub fn parse_opt_bag<'js, T: DeserializeOwned>(
 /// inherited setter. `Object::prop` lowers to `JS_DefineProperty`,
 /// which always creates an own data property and never triggers a
 /// setter — the value lands exactly where a JSON consumer expects.
+#[cfg(test)]
 fn define_own<'js, V: rquickjs::IntoJs<'js>>(obj: &Object<'js>, key: &str, value: V) -> rquickjs::Result<()> {
   obj.prop(key, Property::from(value).writable().enumerable().configurable())
 }
@@ -171,6 +173,13 @@ impl<'js, T: rquickjs::IntoJs<'js>> rquickjs::IntoJs<'js> for Null<T> {
 /// properties, so a `__proto__` key in untrusted input cannot retarget
 /// the prototype.
 pub fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
+  crate::from_json::convert(ctx, v)
+}
+
+/// The rquickjs build [`json_to_js`] answers for, kept as the reference
+/// its tests hold the direct build to.
+#[cfg(test)]
+pub(crate) fn json_to_js_via_rquickjs<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
   match v {
     serde_json::Value::Null => Ok(Value::new_null(ctx.clone())),
     serde_json::Value::Bool(b) => Ok(Value::new_bool(ctx.clone(), *b)),
@@ -186,21 +195,21 @@ pub fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Resul
     serde_json::Value::Array(items) => {
       let arr = rquickjs::Array::new(ctx.clone())?;
       for (i, item) in items.iter().enumerate() {
-        arr.set(i, json_to_js(ctx, item)?)?;
+        arr.set(i, json_to_js_via_rquickjs(ctx, item)?)?;
       }
       Ok(arr.into_value())
     },
     serde_json::Value::Object(map) => {
       let obj = Object::new(ctx.clone())?;
       for (k, val) in map {
-        define_own(&obj, k.as_str(), json_to_js(ctx, val)?)?;
+        define_own(&obj, k.as_str(), json_to_js_via_rquickjs(ctx, val)?)?;
       }
       Ok(obj.into_value())
     },
   }
 }
 
-fn f64_as_exact_i32(n: f64) -> Option<i32> {
+pub(crate) fn f64_as_exact_i32(n: f64) -> Option<i32> {
   if n.is_finite() && n.fract() == 0.0 && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX) {
     // SAFETY: bounds-checked above. Direct cast preserves value for integers in i32 range.
     let trunc = n.trunc();
