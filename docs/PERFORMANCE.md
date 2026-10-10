@@ -246,3 +246,49 @@ Reproduce with any two builds of `examples/profile`:
 /usr/bin/time -l target/release/examples/profile script_noop 300000 --threads 1
 /usr/bin/time -l target/release/examples/profile script_noop 50000 --threads 1
 ```
+
+## The run path and the conversions, 2026-10-10
+
+The same method as the section above. The commit before any of this
+work (`54a066c`) and the result were both built with the Command Line
+Tools SDK. Builds alternate on every repetition, and the result runs
+twice under two names as a noise control, which moved no row by more
+than 0.4%.
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Build a default realm | 3,048,079 | 2,152,189 |
+| Empty VM dispatch | 3,709 | 3,644 |
+| Empty run bracket | 7,532 | 6,807 |
+| Cached script returning a number | 14,085 | 9,240 |
+| Script with one `await` | 28,301 | 27,249 |
+| Script returning its object argument | 32,559 | 25,836 |
+| Script returning a JSON literal | 14,488 | 9,651 |
+| Script returning an object literal | 37,821 | 28,311 |
+| 1,000 object literals in a script | 3,319,802 | 3,318,207 |
+| `json_to_js`, 1,000 rows | 4,512,879 | 3,857,969 |
+| `json_to_js` then `value_to_json`, 1,000 rows | 14,857,382 | 10,286,595 |
+
+A script that never mentions `await` now runs as a plain function, so
+it makes no promise per call. Each run reads the clock once instead of
+three times. Both conversions now run over the raw engine instead of
+rquickjs values and serde. Each takes the same steps as before, which
+tests pin against the old code kept as a test-only reference. The VM
+loop no longer draws a random number or enters an empty tracing span
+per job.
+
+One engine behaviour shapes all of these numbers. quickjs-ng frees a
+4 KiB allocation arena the moment its last block is freed, so a run
+allocating in a size class nothing else in the realm uses builds and
+frees an arena every time. That added 1,700 to 6,000 instructions to a
+short script, depending on whether mimalloc also returned the page to
+the OS. Which class pays depends on unrelated realm contents. A realm
+now keeps one block alive in every class. Object-heavy work can still
+move by up to 17% with what a realm installs, beyond what that block
+covers. That is why `DOMException` and the fetch classes still install
+at build: deferring them saved realm build time and cost object-heavy
+scripts more.
+
+For many scripts from the command line, `ferrijs batch` runs each file
+in a realm of its own inside one process. On 196 small files it took
+9 ms, against 928 ms for one `ferrijs run` per file.
