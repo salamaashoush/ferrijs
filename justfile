@@ -2,8 +2,8 @@ set shell := ["bash", "-cu"]
 
 default: check
 
-# Full gate: format, lint, every test, on the patched engine.
-ready: fmt lint test
+# Full gate: format, lint, docs, every test, on the patched engine.
+ready: fmt lint doc test
   @echo "Ready to commit"
 
 alias r := ready
@@ -19,6 +19,11 @@ test:
 # Clippy over every target with warnings denied.
 lint:
   cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# The docs CI builds, with warnings denied as they are there. The two
+# exclusions are CI's, for the reasons `ci.yml` gives.
+doc:
+  RUSTDOCFLAGS=-Dwarnings cargo doc --workspace --exclude ferrijs-std --exclude ferrijs-cli --all-features --no-deps
 
 # Benchmarks against the engine a consumer actually gets. `--quick`
 # stops each case as soon as it converges; drop it for a publishable

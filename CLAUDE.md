@@ -60,10 +60,11 @@ Dependency flow: cli -> bundle -> ferrijs -> std -> permissions; ferrijs
 ## Gate
 
 `just ready`: `cargo fmt --all -- --check`, `cargo clippy --workspace
---all-targets --all-features -- -D warnings`, `cargo test --workspace
---all-features`. Never commit with any of the three red. No
-`#[allow]` without a comment saying why the lint is wrong here, and only
-where it is.
+--all-targets --all-features -- -D warnings`, `cargo doc` with warnings
+denied, `cargo test --workspace --all-features`. Never commit with any
+of the four red. CI also spell-checks (`typos`), which the gate does
+not run. No `#[allow]` without a comment saying why the lint is wrong
+here, and only where it is.
 
 ## Style
 
