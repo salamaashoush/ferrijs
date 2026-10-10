@@ -93,11 +93,9 @@ pub fn install(ctx: &Ctx<'_>, options: &ProcessOptions) -> rquickjs::Result<()> 
   // answer, so both read the same constants.
   p.set("platform", crate::utils::sysinfo::PLATFORM)?;
   p.set("arch", crate::utils::sysinfo::ARCH)?;
-  // `process.version` is `v<semver>` in Node. The runtime's own name is
-  // in `release.name` and `versions`, where Node keeps it too, so a
-  // `process.version` parser sees the shape it expects and a runtime
-  // sniffer finds the truth where Node puts it.
-  p.set("version", format!("v{}", identity.version))?;
+  // The Node release followed, for version gates; the runtime's own name
+  // and version are in `release.name` and `versions` (see `identity`).
+  p.set("version", format!("v{}", crate::identity::NODE_VERSION))?;
   let versions = Object::new(ctx.clone())?;
   versions.set(identity.name.as_str(), identity.version.as_str())?;
   versions.set("ferrijs", env!("CARGO_PKG_VERSION"))?;
