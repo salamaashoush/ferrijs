@@ -44,6 +44,7 @@ pub mod extension;
 #[cfg(feature = "fetch")]
 pub mod fetch;
 mod from_json;
+pub mod host;
 pub mod limits;
 pub mod modules;
 pub mod pool;

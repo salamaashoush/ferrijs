@@ -35,6 +35,17 @@ pub fn range_error(ctx: &Ctx<'_>, message: impl AsRef<str>) -> rquickjs::Error {
 /// `value`, awaited when it is a promise; any other value as it is. For a
 /// host calling back into script: `settle(&ctx, func.call(args)?).await?`.
 ///
+/// # Errors
+///
+/// The rejection, as [`crate::JsResultExt::or_script_error`] makes it.
+pub async fn settle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Value<'js>, crate::ScriptError> {
+  use crate::error::JsResultExt as _;
+  await_value(ctx, value).await.or_script_error(ctx)
+}
+
+/// [`settle`] for code that stays in rquickjs's `Result`: a binding
+/// awaiting a callback it was handed.
+///
 /// A rejection read here is marked handled first. rquickjs reads a
 /// settled promise without attaching a handler, so without this an
 /// already-rejected promise the host consumed would still count as
@@ -42,24 +53,21 @@ pub fn range_error(ctx: &Ctx<'_>, message: impl AsRef<str>) -> rquickjs::Error {
 ///
 /// # Errors
 ///
-/// The rejection, as [`crate::JsResultExt::or_script_error`] makes it.
-pub async fn settle<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Value<'js>, crate::ScriptError> {
-  use crate::error::JsResultExt as _;
+/// What the promise rejected with, thrown.
+pub async fn await_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Value<'js>> {
   let Some(promise) = value.as_promise().cloned() else {
     return Ok(value);
   };
   if promise.state() == rquickjs::promise::PromiseState::Rejected {
-    let ignore = rquickjs::Function::new(ctx.clone(), || {}).or_script_error(ctx)?;
-    let then: rquickjs::Function<'js> = promise.get("then").or_script_error(ctx)?;
-    then
-      .call::<_, Value<'js>>((
-        rquickjs::function::This(promise.clone()),
-        Value::new_undefined(ctx.clone()),
-        ignore,
-      ))
-      .or_script_error(ctx)?;
+    let ignore = rquickjs::Function::new(ctx.clone(), || {})?;
+    let then: rquickjs::Function<'js> = promise.get("then")?;
+    then.call::<_, Value<'js>>((
+      rquickjs::function::This(promise.clone()),
+      Value::new_undefined(ctx.clone()),
+      ignore,
+    ))?;
   }
-  promise.into_future::<Value<'js>>().await.or_script_error(ctx)
+  promise.into_future::<Value<'js>>().await
 }
 
 /// [`throw_named`] with the `stack` the thrower decided on, rather than
