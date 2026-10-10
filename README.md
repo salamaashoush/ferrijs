@@ -71,6 +71,12 @@ Java's stack-inspection model was removed) are in
 | `ferrijs-bundle`      | rolldown to bytecode, cached on disk under an ABI tag              |
 | `ferrijs-cli`         | `ferrijs run file.ts --allow-net api.example.com`                  |
 
+For many scripts, `ferrijs batch a.js b.ts ...` runs each file in a realm
+of its own inside one process, as many at once as there are cores (or
+`--jobs`), and prints a JSON line per file in the order given. A process
+per file costs milliseconds before any script runs; a realm costs tens of
+microseconds.
+
 ## Extending
 
 ```rust

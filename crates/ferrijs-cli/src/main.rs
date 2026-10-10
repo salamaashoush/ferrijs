@@ -1,5 +1,6 @@
-//! `ferrijs run <file>` and `ferrijs eval <source>`: a realm from the
-//! command line, granting exactly what the flags say.
+//! `ferrijs run <file>`, `ferrijs batch <files>` and `ferrijs eval
+//! <source>`: a realm from the command line, granting exactly what the
+//! flags say.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,6 +35,18 @@ enum Command {
     /// Values bound as the `args` global, parsed as JSON when they parse
     /// and taken as strings otherwise.
     args: Vec<String>,
+    #[command(flatten)]
+    grants: Grants,
+  },
+  /// Run many files in one process, each in a realm of its own, several
+  /// at once. Prints one JSON line per file, in the order given, with its
+  /// value or error and what it logged; fails if any file failed.
+  Batch {
+    #[arg(required = true)]
+    files: Vec<PathBuf>,
+    /// How many files run at once. Defaults to the number of cores.
+    #[arg(long, short = 'j')]
+    jobs: Option<usize>,
     #[command(flatten)]
     grants: Grants,
   },
@@ -149,6 +162,12 @@ impl Grants {
   }
 
   async fn runtime(&self, root: PathBuf) -> Result<Runtime, String> {
+    self.runtime_with(root, true).await
+  }
+
+  /// A realm whose console streams to the terminal, or, for a batch whose
+  /// files would interleave their output, keeps it with the run.
+  async fn runtime_with(&self, root: PathBuf, stream: bool) -> Result<Runtime, String> {
     let mut modules = ModulePolicy::new(root);
     if self.no_builtins {
       modules = modules.no_builtins();
@@ -168,7 +187,7 @@ impl Grants {
       })
       .modules(modules)
       .console(ferrijs::ConsoleOptions {
-        sink: Some(Arc::new(Stdio { json: self.json })),
+        sink: stream.then(|| Arc::new(Stdio { json: self.json }) as Arc<dyn ConsoleSink>),
         ..ferrijs::ConsoleOptions::default()
       })
       .build()
@@ -221,9 +240,18 @@ fn parse_args(raw: &[String]) -> Vec<serde_json::Value> {
 }
 
 async fn run_file(file: PathBuf, args: Vec<String>, grants: Grants) -> Result<ferrijs::Run<serde_json::Value>, String> {
+  run_file_with(file, args, &grants, true).await
+}
+
+async fn run_file_with(
+  file: PathBuf,
+  args: Vec<String>,
+  grants: &Grants,
+  stream: bool,
+) -> Result<ferrijs::Run<serde_json::Value>, String> {
   let file = std::fs::canonicalize(&file).map_err(|e| format!("{}: {e}", file.display()))?;
   let root = file.parent().map(PathBuf::from).unwrap_or_default();
-  let rt = grants.runtime(root.clone()).await?;
+  let rt = grants.runtime_with(root.clone(), stream).await?;
   let source = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
   let args = parse_args(&args);
   let needs_bundle = ferrijs_bundle::is_typescript_path(&file) || ferrijs_bundle::source_is_es_module(&source);
@@ -244,6 +272,58 @@ async fn run_file(file: PathBuf, args: Vec<String>, grants: Grants) -> Result<fe
   } else {
     Ok(rt.eval_script(&source, &args, RunOptions::default()).await)
   }
+}
+
+/// Every file in a realm of its own, at most `jobs` at a time, reported
+/// in the order given once all have finished.
+async fn batch(files: Vec<PathBuf>, jobs: Option<usize>, grants: Grants) -> ExitCode {
+  let jobs = jobs
+    .or_else(|| std::thread::available_parallelism().ok().map(std::num::NonZero::get))
+    .unwrap_or(1)
+    .max(1);
+  let grants = Arc::new(grants);
+  let slots = Arc::new(tokio::sync::Semaphore::new(jobs));
+  let mut running = tokio::task::JoinSet::new();
+  for (index, file) in files.iter().cloned().enumerate() {
+    let grants = Arc::clone(&grants);
+    let slots = Arc::clone(&slots);
+    running.spawn(async move {
+      let _slot = slots.acquire_owned().await;
+      (index, run_file_with(file, Vec::new(), &grants, false).await)
+    });
+  }
+  let mut outcomes: Vec<Option<Result<ferrijs::Run<serde_json::Value>, String>>> = files.iter().map(|_| None).collect();
+  while let Some(done) = running.join_next().await {
+    match done {
+      Ok((index, outcome)) => outcomes[index] = Some(outcome),
+      Err(e) => eprintln!("a batch task failed: {e}"),
+    }
+  }
+  let mut failed = false;
+  for (file, outcome) in files.iter().zip(outcomes) {
+    let mut line = match outcome {
+      Some(Ok(run)) => {
+        failed |= run.result.is_err();
+        serde_json::to_value(run.into_result()).unwrap_or_default()
+      },
+      Some(Err(message)) => {
+        failed = true;
+        serde_json::json!({ "status": "error", "error": { "message": message } })
+      },
+      None => {
+        failed = true;
+        serde_json::json!({ "status": "error", "error": { "message": "the file's task did not finish" } })
+      },
+    };
+    if let Some(fields) = line.as_object_mut() {
+      fields.insert(
+        "file".to_string(),
+        serde_json::Value::String(file.display().to_string()),
+      );
+    }
+    println!("{line}");
+  }
+  if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
 fn report(run: &ferrijs::Run<serde_json::Value>) -> ExitCode {
@@ -303,6 +383,7 @@ async fn async_main(stamp: &dyn Fn(&str)) -> ExitCode {
   let cli = Cli::parse();
   stamp("args parsed");
   let outcome = match cli.command {
+    Command::Batch { files, jobs, grants } => return batch(files, jobs, grants).await,
     Command::Run { file, args, grants } => run_file(file, args, grants).await,
     Command::Eval { source, grants } => match grants.runtime(std::env::current_dir().unwrap_or_default()).await {
       Ok(rt) => {
