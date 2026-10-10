@@ -4,6 +4,7 @@
 use rquickjs::{Ctx, Object, Value};
 
 pub mod assert;
+pub mod buffer;
 pub mod bytes;
 pub mod deep_equal;
 pub mod inspect;

@@ -279,10 +279,9 @@ for ferridriver's convenience. Upstream candidates.
 ## Known gaps against Node — `Buffer`
 
 `Buffer` is a real `Uint8Array` subclass, so every typed-array method
-works and index access reads bytes. Missing against Node: the
-string-aware overrides of `includes` / `indexOf` / `lastIndexOf` / `fill`
-(the `Uint8Array` versions are inherited, so they take byte values, not
-strings), `swap16` / `swap32` / `swap64`, `compare`, and `Buffer.poolSize`.
+works and index access reads bytes. `includes`, `indexOf`,
+`lastIndexOf`, `fill`, `compare`, `Buffer.compare` and the `swap*`
+methods follow Node (delta 42). Missing against Node: `Buffer.poolSize`.
 
 17. **`crypto/provider/{ring,openssl,graviola}.rs` are not vendored.**
     Only the pure-Rust provider (`crypto-rust`, upstream's own default) is
@@ -621,3 +620,33 @@ the extension that needs it.
     whose prototype only chains to `Blob` once that group has run. Tests
     in `crates/ferrijs/tests/lazy_globals.rs` hold a lazy realm to the
     eager one and cover each Rust path above.
+
+42. **`buffer/mod.rs` — Node's search, fill, compare and byte swaps.**
+    The inherited `Uint8Array` methods take byte values, so
+    `buf.indexOf(',')` answered `-1` without an error. `node/buffer.rs`
+    (ours) defines `indexOf`, `lastIndexOf`, `includes`, `fill`, `compare`,
+    `Buffer.compare` and `swap16` / `swap32` / `swap64` after Node's
+    `lib/buffer.js` and `node_buffer.cc`. That covers the offset coercion
+    and clamping, the empty needle, the 16-bit units and even length of a
+    UCS-2 search, the repeated fill pattern and the error codes.
+    `add_missing_prototype_methods` calls it, so `class.rs` stays a
+    mechanical diff. `crates/ferrijs/tests/node_buffer_conformance.rs`
+    holds 9,056 cases to output recorded from Node 24.
+
+43. **`encoding/mod.rs` and `buffer/class.rs` — Node's lenient decoding,
+    `base64url` and `byteLength`.** Node never fails to decode hex or
+    base64. Hex reads digit pairs up to the first bad one. Base64 takes
+    both alphabets, skips other characters and stops at `=`. The strict
+    SIMD decoders threw (`Buffer.from('abc', 'hex')` was a `HexError`
+    where Node gives `<ab>`). `base64url` was not a Buffer encoding at
+    all. `Buffer.byteLength` of a string now uses Node's arithmetic
+    (`length >>> 1` for hex, `base64ByteLength` for base64) instead of
+    decoding it, and measures a view by its bytes whatever the encoding.
+    The strict decoders stay for JWK.
+
+44. **`tty/mod.rs` — `isatty` of a non-integer is `false`.** Node
+    answers `false` for anything that is not an integer descriptor in
+    range. The `i32` conversion threw, which broke `debug` (it asks
+    `tty.isatty(process.stderr.fd)`, and the realm's streams have no
+    `fd`).
+

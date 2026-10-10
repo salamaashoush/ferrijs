@@ -31,7 +31,7 @@ impl StringDecoder {
 
         if matches!(
             self.encoder,
-            Encoder::Utf8 | Encoder::Utf16le | Encoder::Base64
+            Encoder::Utf8 | Encoder::Utf16le | Encoder::Base64 | Encoder::Base64Url
         ) {
             // See if we want bytes to finish a character from the previous
             // chunk; if so, copy the new bytes to the missing bytes buffer
@@ -164,7 +164,7 @@ impl StringDecoder {
                         self.buffered_bytes = 2;
                         self.missing_bytes = 2;
                     }
-                } else if matches!(self.encoder, Encoder::Base64) {
+                } else if matches!(self.encoder, Encoder::Base64 | Encoder::Base64Url) {
                     self.buffered_bytes = data.len() % 3;
                     if self.buffered_bytes > 0 {
                         self.missing_bytes = 3 - self.buffered_bytes;

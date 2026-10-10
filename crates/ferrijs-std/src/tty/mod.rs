@@ -4,7 +4,7 @@ use crate::utils::module::{export_default, ModuleInfo};
 use rquickjs::{
     module::{Declarations, Exports, ModuleDef},
     prelude::Func,
-    Ctx, Result,
+    Ctx, Result, Value,
 };
 
 // Windows' CRT `_isatty` answers for any character device, so a pipe to NUL
@@ -38,7 +38,18 @@ impl ModuleDef for TtyModule {
 
     fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> Result<()> {
         export_default(ctx, exports, |default| {
-            default.set("isatty", Func::from(isatty))?;
+            // Local delta: Node answers `false` for anything that is not an
+            // integer descriptor in range (`tty.isatty(undefined)`, which
+            // `debug` asks of a stream with no `fd`), where the `i32`
+            // conversion threw.
+            default.set(
+                "isatty",
+                Func::from(|fd: Value<'_>| {
+                    fd.as_number()
+                        .filter(|n| n.fract() == 0.0 && (0.0..=f64::from(i32::MAX)).contains(n))
+                        .is_some_and(|n| isatty(n as i32))
+                }),
+            )?;
             Ok(())
         })
     }

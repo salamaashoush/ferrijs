@@ -141,6 +141,10 @@ fn add_missing_prototype_methods<'js>(ctx: &Ctx<'js>) -> Result<()> {
         })?,
     )?;
 
+    // Local delta: the string-aware search and fill, `compare` and the
+    // byte swaps. Ours, in `node/buffer.rs`.
+    crate::node::buffer::install(ctx, &buffer, &prototype)?;
+
     Ok(())
 }
 

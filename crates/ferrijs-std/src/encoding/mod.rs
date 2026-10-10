@@ -8,6 +8,10 @@ use hex_simd::AsciiCase;
 pub enum Encoder {
     Hex,
     Base64,
+    /// Local delta: Node's `base64url`, the URL-safe alphabet with no
+    /// padding when encoding; decoding takes either alphabet, as Node's
+    /// does for both labels.
+    Base64Url,
     /// WHATWG `windows-1252`: bytes 0x80-0x9F carry the punctuation
     /// block, everything else is Latin-1. What `TextDecoder` uses for
     /// this label family.
@@ -65,6 +69,7 @@ const NODE_ENCODING_MAP: phf::Map<&'static str, Encoder> = phf::phf_map! {
     "buffer" => Encoder::Utf8,
     "hex" => Encoder::Hex,
     "base64" => Encoder::Base64,
+    "base64url" => Encoder::Base64Url,
     "utf-8" => Encoder::Utf8,
     "utf8" => Encoder::Utf8,
     "ucs-2" => Encoder::Utf16le,
@@ -154,6 +159,7 @@ impl Encoder {
         match self {
             Self::Hex => Ok(bytes_to_hex_string(bytes)),
             Self::Base64 => Ok(bytes_to_b64_string(bytes)),
+            Self::Base64Url => Ok(bytes_to_b64_url_safe_string(bytes)),
             Self::Utf8 => bytes_to_utf8_string(bytes, lossy),
             Self::Windows1252 => Ok(windows_1252_to_string(bytes)),
             Self::Latin1 => Ok(bytes.iter().map(|b| char::from(*b)).collect()),
@@ -168,6 +174,7 @@ impl Encoder {
         match self {
             Self::Hex => Ok(bytes_to_hex(bytes)),
             Self::Base64 => Ok(bytes_to_b64(bytes)),
+            Self::Base64Url => Ok(bytes_to_b64_url_safe_string(bytes).into_bytes()),
             Self::Utf8 | Self::Windows1252 | Self::Latin1 | Self::Ascii | Self::Utf16le | Self::Utf16be => {
                 Ok(bytes.to_vec())
             },
@@ -177,7 +184,7 @@ impl Encoder {
     pub fn decode<'a, T: Into<Cow<'a, [u8]>>>(&self, bytes: T) -> Result<Vec<u8>, String> {
         match self {
             Self::Hex => bytes_from_hex(bytes),
-            Self::Base64 => bytes_from_b64(bytes),
+            Self::Base64 | Self::Base64Url => Ok(bytes_from_b64_node(&bytes.into())),
             Self::Utf8 | Self::Windows1252 | Self::Latin1 | Self::Ascii | Self::Utf16le | Self::Utf16be => {
                 Ok(bytes.into().into())
             },
@@ -187,7 +194,7 @@ impl Encoder {
     pub fn decode_from_string(&self, string: String) -> Result<Vec<u8>, String> {
         match self {
             Self::Hex => bytes_from_hex(string.into_bytes()),
-            Self::Base64 => bytes_from_b64(string.into_bytes()),
+            Self::Base64 | Self::Base64Url => Ok(bytes_from_b64_node(string.as_bytes())),
             Self::Utf8 => Ok(string.into_bytes()),
             Self::Windows1252 => Ok(string_to_windows_1252(&string)),
             // Node truncates rather than refusing: `Buffer.from('€',
@@ -211,6 +218,7 @@ impl Encoder {
         match self {
             Self::Hex => "hex",
             Self::Base64 => "base64",
+            Self::Base64Url => "base64url",
             Self::Windows1252 => "windows-1252",
             Self::Latin1 => "latin1",
             Self::Ascii => "ascii",
@@ -225,8 +233,61 @@ pub fn bytes_to_hex(bytes: &[u8]) -> Vec<u8> {
     hex_simd::encode_type(bytes, AsciiCase::Lower)
 }
 
+// Local delta: Node's hex decoding, which never fails. `hex_decode` in
+// Node reads digit pairs and stops at the first pair holding a non-hex
+// digit; an odd trailing digit is dropped. `Buffer.from('abc', 'hex')` is
+// `<ab>`, where the strict SIMD decoder threw.
 pub fn bytes_from_hex<'a, T: Into<Cow<'a, [u8]>>>(hex_bytes: T) -> Result<Vec<u8>, String> {
-    hex_simd::decode_to_vec(hex_bytes.into()).map_err(|err| err.to_string())
+    let bytes = hex_bytes.into();
+    let digit = |c: u8| (c as char).to_digit(16);
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for [first, second] in bytes.as_chunks::<2>().0 {
+        match (digit(*first), digit(*second)) {
+            #[allow(clippy::cast_possible_truncation)]
+            (Some(hi), Some(lo)) => out.push((hi << 4 | lo) as u8),
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+// Local delta: Node's base64 decoding, which never fails. Node's fallback
+// decoder (nbytes `base64_decode`) takes both alphabets, skips any other
+// character, stops at the first `=`, and turns a trailing 2 or 3 symbols
+// into 1 or 2 bytes. `Buffer.from('Y!Q', 'base64')` is `<61>`.
+fn bytes_from_b64_node(bytes: &[u8]) -> Vec<u8> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 2);
+    let mut group = [0u8; 4];
+    let mut filled = 0;
+    for &c in bytes {
+        if c == b'=' {
+            break;
+        }
+        let Some(v) = value(c) else { continue };
+        group[filled] = v;
+        filled += 1;
+        if filled == 4 {
+            out.push(group[0] << 2 | group[1] >> 4);
+            out.push(group[1] << 4 | group[2] >> 2);
+            out.push(group[2] << 6 | group[3]);
+            filled = 0;
+        }
+    }
+    if filled >= 2 {
+        out.push(group[0] << 2 | group[1] >> 4);
+    }
+    if filled == 3 {
+        out.push(group[1] << 4 | group[2] >> 2);
+    }
+    out
 }
 
 pub fn bytes_from_b64<'a, T: Into<Cow<'a, [u8]>>>(base64_bytes: T) -> Result<Vec<u8>, String> {

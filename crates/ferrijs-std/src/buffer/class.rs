@@ -208,11 +208,32 @@ fn alloc_unsafe_slow(ctx: Ctx<'_>, size: usize) -> Result<Value<'_>> {
 
 fn byte_length<'js>(ctx: Ctx<'js>, value: Value<'js>, encoding: Opt<String>) -> Result<usize> {
     //slow path
-    if let Some(encoding) = encoding.0 {
-        let encoder = Encoder::from_str(&encoding).or_throw(&ctx)?;
-        let a = ObjectBytes::from(&ctx, &value)?;
-        let bytes = a.as_bytes(&ctx)?;
-        return Ok(encoder.decode(bytes).or_throw(&ctx)?.len());
+    // Local delta: Node measures a string by its encoding's arithmetic
+    // rather than by decoding it, and measures anything else by its bytes
+    // whatever the encoding says.
+    if let (Some(encoding), Some(string)) = (encoding.0.as_deref(), value.as_string()) {
+        let encoder = Encoder::from_str(encoding).or_throw(&ctx)?;
+        let text = string.to_string()?;
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let units = utf16.len();
+        let padding = u16::from(b'=');
+        return Ok(match encoder {
+            Encoder::Hex => units >> 1,
+            // `base64ByteLength`: up to two trailing `=` do not count.
+            Encoder::Base64 | Encoder::Base64Url => {
+                let mut len = units;
+                if len > 0 && utf16[len - 1] == padding {
+                    len -= 1;
+                }
+                if len > 1 && utf16[len - 1] == padding {
+                    len -= 1;
+                }
+                (len * 3) >> 2
+            },
+            Encoder::Utf16le | Encoder::Utf16be => units * 2,
+            Encoder::Latin1 | Encoder::Ascii | Encoder::Windows1252 => units,
+            Encoder::Utf8 => text.len(),
+        });
     }
     //fast path
     if let Some(val) = value.as_string() {
