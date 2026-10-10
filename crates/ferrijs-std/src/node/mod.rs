@@ -5,8 +5,10 @@ use rquickjs::{Ctx, Object, Value};
 
 pub mod assert;
 pub mod buffer;
+mod bundled;
 pub mod bytes;
 pub mod deep_equal;
+pub mod diagnostics_channel;
 pub mod events;
 pub mod inspect;
 pub mod path;

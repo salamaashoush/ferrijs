@@ -64,7 +64,7 @@ Two entry points, and nothing else to remember:
   and the object `require()` returns: `path`, `buffer`, `os`, `util`,
   `events`, `assert` (+ `/strict`), `url`, `process`, `timers` (+
   `/promises`), `crypto`, `zlib`, `string_decoder`, `perf_hooks`, `tty`,
-  `stream/web`. The host merges that list into its own loader,
+  `stream` (+ `/promises`), `stream/web`, `diagnostics_channel`. The host merges that list into its own loader,
   its `require` table and its bundler's external list, so the three
   cannot drift apart.
 
@@ -85,6 +85,7 @@ implementation of each surface:
 | `node::process` | A sandbox-safe `process` — inert identity and timing, with `env` and `cwd()` supplied by the host — and its module form |
 | `node::timers` | The module form of `web::timers`, plus `timers/promises` |
 | `node::path` | The `path` module, moved out of `ferridriver-script`'s `node_compat` |
+| `node::diagnostics_channel` | `node:diagnostics_channel`, Node 24's implementation adapted to run without Node's internals; llrt has none |
 | `node::bytes` | The one JS-value-to-`Vec<u8>` walk: `BufferSource`, `Buffer`, byte arrays, encoded strings. `crypto`, the compression streams, `Buffer.from` and `setInputFiles` all read through it — there were three separate walks before |
 
 `src/node/` carries its own `rustfmt.toml` re-enabling formatting (the crate

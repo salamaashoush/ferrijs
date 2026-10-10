@@ -495,6 +495,11 @@ pub fn modules() -> Vec<NodeModule> {
       namespace: crate::node::stream::promises_namespace,
     },
     NodeModule {
+      specifiers: &["diagnostics_channel", "node:diagnostics_channel"],
+      declare: declare_fn::<crate::node::diagnostics_channel::DiagnosticsChannelModule>(),
+      namespace: crate::node::diagnostics_channel::namespace,
+    },
+    NodeModule {
       specifiers: &["perf_hooks", "node:perf_hooks"],
       declare: declare_fn::<crate::perf_hooks::PerfHooksModule>(),
       namespace: perf_hooks_namespace,

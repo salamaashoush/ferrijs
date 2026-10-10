@@ -9,12 +9,15 @@
 //! instance, so `require('stream').Readable === (await
 //! import('node:stream')).Readable`.
 
-use std::sync::OnceLock;
-
 use rquickjs::module::{Declarations, Exports, ModuleDef};
-use rquickjs::{Ctx, Function, JsLifetime, Module, Object, Result, Value, WriteOptions, WriteOptionsEndianness};
+use rquickjs::{Ctx, Function, JsLifetime, Object, Result, Value};
 
-const SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/readable_stream.mjs"));
+use super::bundled::Bundled;
+
+static READABLE_STREAM: Bundled = Bundled::new(
+  "ferrijs:readable-stream",
+  include_str!(concat!(env!("OUT_DIR"), "/readable_stream.mjs")),
+);
 
 /// The members `node:stream` exports by name, besides `default`.
 const STREAM_EXPORTS: &[&str] = &[
@@ -43,28 +46,11 @@ const STREAM_EXPORTS: &[&str] = &[
 
 const PROMISES_EXPORTS: &[&str] = &["pipeline", "finished"];
 
-/// The compiled module, shared by every realm in the process. Loaded
-/// with `JS_READ_OBJ_ROM_DATA`, so the engine may point into these bytes
-/// for as long as a realm lives: the process, here.
-static BYTECODE: OnceLock<Vec<u8>> = OnceLock::new();
-
 /// A realm's instance: the `stream` and `stream/promises` exports.
 #[derive(JsLifetime)]
 struct Instance<'js> {
   stream: Object<'js>,
   promises: Object<'js>,
-}
-
-fn bytecode(ctx: &Ctx<'_>) -> Result<&'static [u8]> {
-  if let Some(bytes) = BYTECODE.get() {
-    return Ok(bytes);
-  }
-  let module = Module::declare(ctx.clone(), "ferrijs:readable-stream", SOURCE)?;
-  let bytes = module.write(WriteOptions {
-    endianness: WriteOptionsEndianness::Native,
-    ..WriteOptions::default()
-  })?;
-  Ok(BYTECODE.get_or_init(|| bytes))
 }
 
 /// What the package's `require` answers for a name outside it.
@@ -94,14 +80,7 @@ fn instance<'js>(ctx: &Ctx<'js>) -> Result<(Object<'js>, Object<'js>)> {
   if let Some(instance) = ctx.userdata::<Instance<'js>>() {
     return Ok((instance.stream.clone(), instance.promises.clone()));
   }
-  let bytes = bytecode(ctx)?;
-  // SAFETY: the bytes were written by this process's own engine a moment
-  // or a realm ago, so the bytecode ABI matches by construction, and they
-  // live in a process-wide static, as ROM data must.
-  #[allow(unsafe_code)]
-  let declared = unsafe { Module::load(ctx.clone(), bytes) }?;
-  let (module, _promise) = declared.eval()?;
-  let load: Function<'js> = module.namespace()?.get("default")?;
+  let load: Function<'js> = READABLE_STREAM.evaluate(ctx)?.get()?;
   let loaded: Object<'js> = load.call((Function::new(ctx.clone(), external)?,))?;
   let stream: Object<'js> = loaded.get("stream")?;
   let promises: Object<'js> = loaded.get("promises")?;

@@ -34,8 +34,9 @@ println!("{:?} in {}ms", run.result, run.duration_ms);
   compression streams, the timers, `queueMicrotask`, `console`.
 - **The Node modules**, under the names Node serves them: `node:fs`
   (and `fs/promises`), `path`, `buffer`, `crypto`, `events`, `util`,
-  `assert`, `url`, `os`, `zlib`, `stream/web`, `string_decoder`,
-  `timers`, `perf_hooks`, `tty`, `process`; `require()` for the CommonJS
+  `assert`, `url`, `os`, `zlib`, `stream` (and `stream/promises`),
+  `stream/web`, `string_decoder`, `timers`, `perf_hooks`, `tty`,
+  `diagnostics_channel`, `process`; `require()` for the CommonJS
   spelling; `process` with `env`, `cwd()`, `hrtime`, `nextTick`,
   `permission.has()` and `permission.drop()`.
 - **ES modules** from disk under a policy (a root, optionally a jail,
