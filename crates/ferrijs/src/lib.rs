@@ -53,6 +53,7 @@ pub mod runtime;
 pub mod script_cache;
 pub mod source_map;
 pub mod timers;
+mod to_json;
 pub mod value;
 pub mod vm;
 

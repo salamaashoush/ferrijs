@@ -212,14 +212,21 @@ fn f64_as_exact_i32(n: f64) -> Option<i32> {
 
 /// Convert a script's value to `serde_json::Value`.
 ///
-/// `ferrijs-serde` drives the deserializer: it invokes `toJSON()` /
-/// `valueOf()` (a returned `Date` still serialises as its ISO string),
-/// coerces whole f64 in the safe-integer range to `i64`, drops
-/// `undefined` / function / symbol, and renders non-finite as null.
-/// The private `JsonValue` is what receives it, and says there why
-/// `serde_json::Value`'s own `Deserialize` cannot.
+/// The rules are `ferrijs-serde`'s: it invokes `toJSON()` / `valueOf()`
+/// (a returned `Date` still serialises as its ISO string), coerces whole
+/// f64 in the safe-integer range to `i64`, drops `undefined` / function /
+/// symbol, and renders non-finite as null. The walk itself is
+/// [`crate::to_json`], which answers what that deserializer would without
+/// its per-value overhead.
 #[must_use]
-pub fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
+pub fn value_to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
+  crate::to_json::convert(ctx, &value)
+}
+
+/// The `ferrijs-serde` walk [`value_to_json`] answers for, kept as the
+/// reference its tests hold the faster walk to.
+#[cfg(test)]
+pub(crate) fn value_to_json_via_serde(value: Value<'_>) -> Option<serde_json::Value> {
   ferrijs_serde::from_value::<JsonValue>(value).ok().map(|v| v.0)
 }
 
@@ -237,8 +244,10 @@ pub fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_js
 /// mirror: filling a `Vec<(String, _)>` per object and a `Vec<_>` per
 /// array only to walk them again cost an allocation and a move per
 /// container for no gain.
+#[cfg(test)]
 struct JsonValue(serde_json::Value);
 
+#[cfg(test)]
 impl<'de> serde::Deserialize<'de> for JsonValue {
   fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
     struct V;
