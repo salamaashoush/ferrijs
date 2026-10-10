@@ -153,3 +153,28 @@ async fn events_exposes_the_emitter_over_import_and_require() {
   assert_eq!(value["listenerCount"], 1);
   assert_eq!(value["names"], serde_json::json!(["tick"]));
 }
+
+#[tokio::test]
+async fn max_listeners_answer_as_node() {
+  // Node 24's output for the same script.
+  let rt = runtime().await;
+  let run = rt
+    .eval_script(
+      r#"const E = require("events"); const e = new E();
+      const out = [e.getMaxListeners(), e.setMaxListeners(3) === e, e.getMaxListeners(), E.defaultMaxListeners];
+      E.defaultMaxListeners = 7; out.push(new E().getMaxListeners());
+      try { e.setMaxListeners(-1) } catch (x) { out.push(x.code) }
+      try { E.defaultMaxListeners = "x" } catch (x) { out.push(x.code) }
+      E.setMaxListeners(5, e); out.push(E.getMaxListeners(e));
+      class Sub extends E { constructor() { super(); this.setMaxListeners(30); } }
+      out.push(new Sub().getMaxListeners());
+      return out;"#,
+      &[],
+      RunOptions::default(),
+    )
+    .await;
+  assert_eq!(
+    run.result.expect("run"),
+    serde_json::json!([10, true, 3, 10, 7, "ERR_OUT_OF_RANGE", "ERR_INVALID_ARG_TYPE", 5, 30])
+  );
+}

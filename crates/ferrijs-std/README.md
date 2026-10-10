@@ -650,3 +650,20 @@ the extension that needs it.
     `tty.isatty(process.stderr.fd)`, and the realm's streams have no
     `fd`).
 
+45. **`node:stream` and `node:stream/promises` come from readable-stream.**
+    Upstream has no `node:stream`. `js/readable-stream` vendors Node's
+    own streams code, unmodified, as the Node project publishes it for
+    other runtimes. `build.rs` wraps it into one module, and
+    `node/stream.rs` (ours) compiles it to bytecode once per process and
+    loads it into a realm on first import, about 0.6 ms. Its outside
+    `require`s are answered by this crate's `buffer`, `events` and
+    `string_decoder` and the realm's `process`. `modules.rs` serves both
+    specifiers from one instance per realm. A test replays 19 scenarios
+    against the event log Node 24 records for them.
+
+46. **`EventEmitter` max listeners.** `setMaxListeners`,
+    `getMaxListeners`, `defaultMaxListeners` and the static forms are
+    added in `node/events.rs` (ours), installed where `events_namespace`
+    builds the per-realm constructor. Node's leak warning past the limit
+    is not, for want of a process warning channel.
+

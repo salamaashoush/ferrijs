@@ -121,7 +121,7 @@ pub use crate::buffer::BufferModule;
 
 /// `require('buffer')`: the same members the ES module exports, read off
 /// the globals the runtime installed.
-fn buffer_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+pub(crate) fn buffer_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   let ns = Object::new(ctx.clone())?;
   for name in ["Buffer", "atob", "btoa"] {
     if let Ok(value) = ctx.globals().get::<_, Value<'js>>(name) {
@@ -337,7 +337,7 @@ pub struct EventsModule;
 /// `Object.keys` and cannot collide with a suite's own globals.
 const EVENT_EMITTER_KEY: &str = "ferrijs.node.events.EventEmitter";
 
-fn events_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+pub(crate) fn events_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   use crate::events::{Emitter as _, EventEmitter};
 
   let symbol: Object<'js> = ctx.globals().get("Symbol")?;
@@ -363,6 +363,7 @@ fn events_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   // Node's `module.exports` for this module IS the class, with the named
   // export hanging off it — so `require('events')` can be extended.
   ctor.set("EventEmitter", ctor.clone())?;
+  crate::node::events::install(ctx, &ctor)?;
   ctx.globals().set(key, ctor.clone())?;
   Ok(ctor)
 }
@@ -484,6 +485,16 @@ pub fn modules() -> Vec<NodeModule> {
       namespace: string_decoder_namespace,
     },
     NodeModule {
+      specifiers: &["stream", "node:stream"],
+      declare: declare_fn::<crate::node::stream::StreamModule>(),
+      namespace: crate::node::stream::stream_namespace,
+    },
+    NodeModule {
+      specifiers: &["stream/promises", "node:stream/promises"],
+      declare: declare_fn::<crate::node::stream::StreamPromisesModule>(),
+      namespace: crate::node::stream::promises_namespace,
+    },
+    NodeModule {
       specifiers: &["perf_hooks", "node:perf_hooks"],
       declare: declare_fn::<crate::perf_hooks::PerfHooksModule>(),
       namespace: perf_hooks_namespace,
@@ -534,7 +545,7 @@ fn zlib_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   module_default_object::<crate::zlib::ZlibModule>(ctx, "zlib", ZLIB_MEMBERS)
 }
 
-fn string_decoder_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+pub(crate) fn string_decoder_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
   module_default_object::<crate::string_decoder::StringDecoderModule>(ctx, "string_decoder", &["StringDecoder"])
 }
 

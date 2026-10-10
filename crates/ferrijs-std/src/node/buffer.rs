@@ -11,6 +11,7 @@
 use rquickjs::function::{Constructor, Opt, This};
 use rquickjs::{Coerced, Ctx, FromJs, Function, Object, Result, TypedArray, Value};
 
+use super::coded;
 use crate::encoding::Encoder;
 
 /// `kMaxLength`, the bound `validateOffset` checks an offset against.
@@ -32,21 +33,6 @@ pub fn install<'js>(ctx: &Ctx<'js>, buffer: &Constructor<'js>, prototype: &Objec
   prototype.set("swap64", Function::new(ctx.clone(), |ctx, this| swap(ctx, this, 8))?)?;
   buffer.set("compare", Function::new(ctx.clone(), compare_static)?.with_length(2)?)?;
   Ok(())
-}
-
-/// Throw Node's coded error: a real `TypeError` or `RangeError` with
-/// `code` set, as `internal/errors` makes them.
-fn coded(ctx: &Ctx<'_>, kind: &str, code: &str, message: &str) -> rquickjs::Error {
-  let built = (|| -> Result<Value<'_>> {
-    let ctor: Constructor<'_> = ctx.globals().get(kind)?;
-    let error: Object<'_> = ctor.construct((message,))?;
-    error.set("code", code)?;
-    Ok(error.into_value())
-  })();
-  match built {
-    Ok(error) => ctx.throw(error),
-    Err(error) => error,
-  }
 }
 
 fn invalid_arg_type(ctx: &Ctx<'_>, name: &str, expected: &str) -> rquickjs::Error {

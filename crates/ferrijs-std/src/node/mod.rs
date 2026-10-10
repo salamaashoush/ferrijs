@@ -7,10 +7,12 @@ pub mod assert;
 pub mod buffer;
 pub mod bytes;
 pub mod deep_equal;
+pub mod events;
 pub mod inspect;
 pub mod path;
 pub mod process;
 pub mod require_resolve;
+pub mod stream;
 pub mod system_error;
 pub mod timers;
 pub mod util;
@@ -29,5 +31,20 @@ pub fn throw_named<'js>(ctx: &Ctx<'js>, name: &str, message: impl Into<String>) 
   match built {
     Ok(v) => ctx.throw(v),
     Err(_) => rquickjs::Exception::throw_message(ctx, &message),
+  }
+}
+
+/// Throw Node's coded error: a real `TypeError` or `RangeError` with
+/// `code` set, as `internal/errors` makes them.
+pub(crate) fn coded(ctx: &Ctx<'_>, kind: &str, code: &str, message: &str) -> rquickjs::Error {
+  let built = (|| -> rquickjs::Result<Value<'_>> {
+    let ctor: rquickjs::function::Constructor<'_> = ctx.globals().get(kind)?;
+    let error: Object<'_> = ctor.construct((message,))?;
+    error.set("code", code)?;
+    Ok(error.into_value())
+  })();
+  match built {
+    Ok(error) => ctx.throw(error),
+    Err(error) => error,
   }
 }
