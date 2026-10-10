@@ -16,7 +16,7 @@
 //! output cannot smuggle terminal control codes into the output while our
 //! own styling survives.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -37,6 +37,9 @@ struct ConsoleState {
   indent: AtomicUsize,
   counts: Mutex<FxHashMap<String, u64>>,
   timers: Mutex<FxHashMap<String, Instant>>,
+  /// Set by `console.count` and `console.time`, the only writers of the
+  /// two maps, so a run that used neither resets them without locking.
+  used: AtomicBool,
 }
 
 impl ConsoleState {
@@ -74,6 +77,10 @@ impl ConsoleSlot {
       *slot = capture;
     }
     self.state.indent.store(0, Ordering::Relaxed);
+    if !self.state.used.load(Ordering::Relaxed) {
+      return;
+    }
+    self.state.used.store(false, Ordering::Relaxed);
     if let Ok(mut counts) = self.state.counts.lock() {
       counts.clear();
     }
@@ -459,6 +466,7 @@ pub fn install_console_slot(ctx: &Ctx<'_>, slot: &Arc<ConsoleSlot>) -> rquickjs:
       "count",
       Func::from(move |label: rquickjs::function::Opt<String>| -> rquickjs::Result<()> {
         let label = label_or_default(label.0);
+        slot.state.used.store(true, Ordering::Relaxed);
         let n = slot.state.counts.lock().map_or(0, |mut c| {
           let n = c.entry(label.clone()).or_insert(0);
           *n += 1;
@@ -489,6 +497,7 @@ pub fn install_console_slot(ctx: &Ctx<'_>, slot: &Arc<ConsoleSlot>) -> rquickjs:
       "time",
       Func::from(move |label: rquickjs::function::Opt<String>| {
         let label = label_or_default(label.0);
+        slot.state.used.store(true, Ordering::Relaxed);
         let duplicate = slot
           .state
           .timers
