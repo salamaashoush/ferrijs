@@ -196,8 +196,16 @@ impl ModuleRegistry {
         return Err(format!("module `{specifier}` is already served by this runtime"));
       }
     }
+    // Appended, so every index already in the table stays valid: only
+    // the new module's names need adding, not a rebuild per registration.
+    let position = self.modules.len();
+    for specifier in &module.specifiers {
+      self.index.insert(specifier.clone(), position);
+      if let Some(bare) = specifier.strip_prefix("node:") {
+        self.bare_twins.insert(bare.to_string());
+      }
+    }
     self.modules.push(module);
-    self.reindex();
     Ok(())
   }
 
@@ -245,10 +253,15 @@ impl ModuleRegistry {
   /// Keep only the modules whose canonical name `keep` accepts. What a
   /// policy that serves a subset of the standard library applies.
   pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+    let (modules, aliases) = (self.modules.len(), self.aliases.len());
     self.modules.retain(|m| keep(m.canonical()));
-    let modules = &self.modules;
-    self.aliases.retain(|(_, to)| modules.iter().any(|m| m.answers_to(to)));
-    self.reindex();
+    let kept = &self.modules;
+    self.aliases.retain(|(_, to)| kept.iter().any(|m| m.answers_to(to)));
+    // A policy serving everything removes nothing, and a realm should not
+    // rebuild the index to find that out.
+    if self.modules.len() != modules || self.aliases.len() != aliases {
+      self.reindex();
+    }
   }
 
   /// Reserve a specifier prefix (`@acme/`) so nothing else may claim a
@@ -364,13 +377,17 @@ impl ModuleRegistry {
   /// loader in `AsyncRuntime::set_loader`.
   #[must_use]
   pub fn loader(self: &Arc<Self>) -> (NativeResolver, NativeLoader) {
-    let mut builtin = BuiltinResolver::default();
-    for name in self.names_iter() {
-      builtin.add_module(name);
+    // Bare names are answered from the index. Only a name starting with
+    // `.` needs `BuiltinResolver`'s join onto the importer's path, and a
+    // table almost never serves one, so the set built per realm is
+    // usually empty.
+    let mut dotted = BuiltinResolver::default();
+    for name in self.names_iter().filter(|n| n.starts_with('.')) {
+      dotted.add_module(name);
     }
     (
       NativeResolver {
-        builtin,
+        dotted,
         registry: Arc::clone(self),
       },
       NativeLoader {
@@ -382,7 +399,7 @@ impl ModuleRegistry {
 
 /// Accepts exactly the served specifiers and aliases.
 pub struct NativeResolver {
-  builtin: BuiltinResolver,
+  dotted: BuiltinResolver,
   registry: Arc<ModuleRegistry>,
 }
 
@@ -399,8 +416,14 @@ impl Resolver for NativeResolver {
     // name, and the loader declares the same `ModuleDef` under each
     // spelling, so `import 'fs'` and `import 'node:fs'` each link to a
     // module whose exports are the same objects.
-    let _ = &self.registry;
-    self.builtin.resolve(ctx, base, name, attributes)
+    if name.starts_with('.') {
+      return self.dotted.resolve(ctx, base, name, attributes);
+    }
+    if self.registry.serves(name) {
+      Ok(name.to_string())
+    } else {
+      Err(rquickjs::Error::new_resolving(base, name))
+    }
   }
 }
 

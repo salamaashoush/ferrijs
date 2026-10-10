@@ -44,7 +44,6 @@ pub fn install<'js>(
   hooks: Vec<Arc<dyn RequireHook>>,
 ) -> rquickjs::Result<()> {
   let hooks = Arc::new(hooks);
-  let names = registry.names();
   let (reg, hk) = (Arc::clone(&registry), Arc::clone(&hooks));
   let require = rquickjs::Function::new(
     ctx.clone(),
@@ -60,7 +59,7 @@ pub fn install<'js>(
           &ctx,
           &format!(
             "require('{specifier}') is not available: only the runtime's native modules ({}) can be require()d",
-            names.join(", ")
+            reg.names().join(", ")
           ),
         )),
       }
