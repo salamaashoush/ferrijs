@@ -292,3 +292,9 @@ scripts more.
 For many scripts from the command line, `ferrijs batch` runs each file
 in a realm of its own inside one process. On 196 small files it took
 9 ms, against 928 ms for one `ferrijs run` per file.
+
+The standard library's module table is built once per process and
+cloned into each realm, with its index keys shared rather than copied.
+Rebuilding it cost every realm about 37,000 instructions, and each new
+module about 2,700 more. A default realm now builds in 2,048,218
+instructions against 2,085,720, with the run path unchanged.

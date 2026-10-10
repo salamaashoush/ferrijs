@@ -13,7 +13,7 @@
 //! and as the object `require('<specifier>')` hands back, so a host
 //! cannot wire up the import form and forget the CommonJS one.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rquickjs::loader::{BuiltinResolver, ImportAttributes, Loader, Resolver};
 use rquickjs::module::ModuleDef;
@@ -123,12 +123,13 @@ pub struct ModuleRegistry {
   /// module that answers it. Module resolution and `require` both run
   /// through here on every import, and a linear walk of fifty modules
   /// with a `String` per comparison is not what that should cost.
-  /// Rebuilt by every mutator, all of which run at startup.
-  index: FxHashMap<String, usize>,
+  /// Rebuilt by every mutator, all of which run at startup. Keys are
+  /// shared, so cloning the table for a realm copies no names.
+  index: FxHashMap<Arc<str>, usize>,
   /// The bare spelling of every `node:` name served, so `is_reserved`
   /// answers the "claim on `fs` while we serve `node:fs`" case without
   /// materialising the whole name list.
-  bare_twins: FxHashSet<String>,
+  bare_twins: FxHashSet<Arc<str>>,
 }
 
 impl std::fmt::Debug for ModuleRegistry {
@@ -149,8 +150,16 @@ impl ModuleRegistry {
 
   /// The table with every Node / web module the standard library
   /// serves (`node:fs`, `node:path`, `node:buffer`, ...).
+  ///
+  /// Built once per process and cloned: every realm starts from it, and
+  /// building it means an allocation per name and a hash per index entry.
   #[must_use]
   pub fn with_std() -> Self {
+    static STD: OnceLock<ModuleRegistry> = OnceLock::new();
+    STD.get_or_init(Self::build_std).clone()
+  }
+
+  fn build_std() -> Self {
     let mut registry = Self::new();
     for module in ferrijs_std::modules::modules() {
       registry.modules.push(module.into());
@@ -170,15 +179,15 @@ impl ModuleRegistry {
     self.bare_twins.reserve(specifiers);
     for (i, module) in self.modules.iter().enumerate() {
       for specifier in &module.specifiers {
-        self.index.insert(specifier.clone(), i);
+        self.index.insert(specifier.as_str().into(), i);
         if let Some(bare) = specifier.strip_prefix("node:") {
-          self.bare_twins.insert(bare.to_string());
+          self.bare_twins.insert(bare.into());
         }
       }
     }
     for (from, to) in &self.aliases {
-      if let Some(i) = self.index.get(to).copied() {
-        self.index.insert(from.clone(), i);
+      if let Some(i) = self.index.get(to.as_str()).copied() {
+        self.index.insert(from.as_str().into(), i);
       }
     }
   }
@@ -200,9 +209,9 @@ impl ModuleRegistry {
     // the new module's names need adding, not a rebuild per registration.
     let position = self.modules.len();
     for specifier in &module.specifiers {
-      self.index.insert(specifier.clone(), position);
+      self.index.insert(specifier.as_str().into(), position);
       if let Some(bare) = specifier.strip_prefix("node:") {
-        self.bare_twins.insert(bare.to_string());
+        self.bare_twins.insert(bare.into());
       }
     }
     self.modules.push(module);
