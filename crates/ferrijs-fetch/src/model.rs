@@ -82,6 +82,59 @@ pub struct RemoteAddr {
   pub port: u16,
 }
 
+/// When the phases of one hop ended, as offsets from its start. A phase
+/// that did not happen is `None`: no lookup for an address literal, no
+/// connect on a connection the pool already had.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Timing {
+  /// Wall-clock start of the hop that produced the response. A redirect
+  /// starts a new hop, as it does in Playwright's `_sendRequest`.
+  pub start_time: std::time::SystemTime,
+  /// The host name was resolved.
+  pub dns_end: Option<Duration>,
+  /// The connection was established, TLS handshake included.
+  pub connect_end: Option<Duration>,
+  /// The response head arrived.
+  pub response_start: Duration,
+}
+
+impl Default for Timing {
+  fn default() -> Self {
+    Self {
+      start_time: std::time::SystemTime::UNIX_EPOCH,
+      dns_end: None,
+      connect_end: None,
+      response_start: Duration::ZERO,
+    }
+  }
+}
+
+/// Answers a `401` Basic challenge from the hop at a URL with the
+/// `Authorization` value to send it again with, or `None` to leave the
+/// challenge to the caller. Asked per hop, so a redirect to another
+/// origin is answered with that origin's credentials and never with the
+/// first one's (Playwright's `_sendRequest`, `server/fetch.ts`).
+#[derive(Clone)]
+pub struct ChallengeAnswer(std::sync::Arc<AnswerFn>);
+
+type AnswerFn = dyn Fn(&reqwest::Url) -> Option<String> + Send + Sync;
+
+impl ChallengeAnswer {
+  pub fn new(answer: impl Fn(&reqwest::Url) -> Option<String> + Send + Sync + 'static) -> Self {
+    Self(std::sync::Arc::new(answer))
+  }
+
+  pub(crate) fn answer(&self, url: &reqwest::Url) -> Option<String> {
+    (self.0)(url)
+  }
+}
+
+impl std::fmt::Debug for ChallengeAnswer {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("ChallengeAnswer")
+  }
+}
+
 /// A fully-resolved request the engine can send as-is.
 #[derive(Debug)]
 pub struct Request {
@@ -104,6 +157,8 @@ pub struct Request {
   /// Sandbox network policy, enforced on the initial URL, every redirect
   /// hop, and every resolved address when active.
   pub net_guard: Option<NetGuard>,
+  /// What answers a Basic challenge, hop by hop.
+  pub challenge: Option<ChallengeAnswer>,
 }
 
 /// The engine's response: metadata plus a single-use body.
@@ -121,6 +176,10 @@ pub struct Response {
   pub unfollowed_redirect: bool,
   pub server_addr: Option<RemoteAddr>,
   pub type_: ResponseType,
+  /// Phase timings of the hop that produced this response.
+  pub timing: Timing,
+  /// The server's leaf certificate, DER-encoded, on a TLS connection.
+  pub peer_certificate: Option<Vec<u8>>,
 }
 
 impl Response {

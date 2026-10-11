@@ -156,6 +156,7 @@ impl FetchBackend for Client {
           timeout: request.timeout.unwrap_or(self.timeout),
           ignore_https_errors: false,
           net_guard: request.net_guard,
+          challenge: None,
         },
       )
       .await

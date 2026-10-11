@@ -161,6 +161,9 @@ pub fn preflight(resolved_url: &str, g: &NetGuard) -> Result<(), GuardError> {
 /// drops any address the guard forbids. Empty after filtering ⇒ the
 /// connection is refused. This is what defeats DNS rebinding: a public
 /// hostname resolving to a metadata/private address never connects.
+///
+/// Every client resolves through it, guarded or not (both flags off
+/// filter nothing): it is also where a hop learns when its lookup ended.
 pub(crate) struct GuardedResolver {
   pub block_metadata: bool,
   pub block_private: bool,
@@ -170,6 +173,7 @@ impl reqwest::dns::Resolve for GuardedResolver {
   fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
     let host = name.as_str().to_string();
     let (bm, bp) = (self.block_metadata, self.block_private);
+    let clock = crate::engine::current_hop();
     Box::pin(async move {
       let lookup = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<SocketAddr>> {
         Ok((host.as_str(), 0u16).to_socket_addrs()?.collect())
@@ -180,8 +184,12 @@ impl reqwest::dns::Resolve for GuardedResolver {
         Ok(Err(e)) => return Err(Box::new(e) as BoxErr),
         Err(e) => return Err(Box::new(e) as BoxErr),
       };
+      if let Some(clock) = clock {
+        clock.resolved();
+      }
+      let found = !addrs.is_empty();
       let kept: Vec<SocketAddr> = addrs.into_iter().filter(|sa| !ip_blocked(sa.ip(), bm, bp)).collect();
-      if kept.is_empty() {
+      if found && kept.is_empty() {
         return Err("all resolved addresses blocked by sandbox network policy".into());
       }
       Ok(Box::new(kept.into_iter()) as reqwest::dns::Addrs)

@@ -11,7 +11,7 @@
 //! - [`error`] — the typed [`FetchError`].
 //! - [`engine`] — the client pool and the one manual-redirect send loop.
 //! - [`net_guard`] — SSRF policy (allow-list, metadata/private blocking).
-//! - [`cookie`] — RFC 6265 parsing/matching for the context-bound path.
+//! - [`cookie`] — RFC 6265 parsing/matching, and the standalone jar.
 //! - [`multipart`] — `multipart/form-data` serialization and parsing.
 //! - [`bridge`] — the two-way cookie/defaults bridge to a host-owned jar
 //!   (a browser context, a session store).
@@ -29,10 +29,10 @@ pub mod net_guard;
 
 pub use body::{Body, ByteStream, channel_stream};
 pub use bridge::{BridgeFuture, ContextBridge, ContextDefaults};
-pub use cookie::{Cookie, SameSite};
+pub use cookie::{Cookie, CookieJar, SameSite};
 pub use error::FetchError;
 pub use headers::Headers;
-pub use model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType};
+pub use model::{ChallengeAnswer, Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType, Timing};
 pub use multipart::{
   MultipartField, MultipartValue, multipart_boundary, multipart_boundary_of, parse_multipart, serialize_multipart,
 };

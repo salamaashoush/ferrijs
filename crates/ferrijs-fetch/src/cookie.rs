@@ -1,8 +1,9 @@
-//! RFC 6265 cookie parsing and matching for the bridged request path.
-//! Ported from Playwright's `server/cookieStore.ts` + `server/fetch.ts`
-//! cookie handling: the host's context is the jar, so the outgoing
-//! `Cookie` header is assembled here from its cookies and every hop's
-//! `Set-Cookie` is parsed back with the same defaults Playwright applies.
+//! RFC 6265 cookie parsing, matching and storage. Ported from
+//! Playwright's `server/cookieStore.ts` + `server/fetch.ts` cookie
+//! handling: the outgoing `Cookie` header is assembled here from the
+//! jar's cookies and every hop's `Set-Cookie` is parsed back with the
+//! same defaults Playwright applies. The jar is the host's context on
+//! the bridged path and a [`CookieJar`] on the standalone one.
 
 /// One cookie as a host jar stores it. The field set is Playwright's
 /// `Cookie` / `SetNetworkCookieParam`, which is what a browser-backed
@@ -115,16 +116,7 @@ pub fn cookie_matches_url(cookie: &Cookie, url: &reqwest::Url) -> bool {
   if !cookie_path_matches(url.path(), &cookie.path) {
     return false;
   }
-  if let Some(expires) = cookie.expires
-    && expires >= 0.0
-    && expires
-      < std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-  {
-    return false;
-  }
-  true
+  !expired(cookie)
 }
 
 /// Parse one `Set-Cookie` header value into a [`Cookie`], porting
@@ -240,9 +232,127 @@ pub fn parse_set_cookie_headers(response_url: &reqwest::Url, headers: &reqwest::
   cookies
 }
 
+/// The cookie jar of a standalone client: Playwright's `CookieStore`
+/// (`server/cookieStore.ts`), which a host can also read, fill and
+/// empty (`request.cookies()` / `addCookies()` / `clearCookies()`).
+/// A transport-owned jar can do none of the three.
+#[derive(Debug, Default)]
+pub struct CookieJar {
+  cookies: std::sync::Mutex<Vec<Cookie>>,
+}
+
+impl CookieJar {
+  fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Cookie>> {
+    self.cookies.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Store `cookies`. One with the name, domain and path of a stored
+  /// cookie replaces it (RFC 6265 §5.3), and one that has already
+  /// expired therefore deletes it.
+  pub fn add(&self, cookies: impl IntoIterator<Item = Cookie>) {
+    let mut stored = self.lock();
+    for cookie in cookies {
+      stored.retain(|other| !same_cookie(other, &cookie));
+      stored.push(cookie);
+    }
+    stored.retain(|cookie| !expired(cookie));
+  }
+
+  /// Every unexpired cookie, oldest first.
+  #[must_use]
+  pub fn all(&self) -> Vec<Cookie> {
+    let mut stored = self.lock();
+    stored.retain(|cookie| !expired(cookie));
+    stored.clone()
+  }
+
+  /// Drop the cookies `matches` answers true for.
+  pub fn remove(&self, matches: impl Fn(&Cookie) -> bool) {
+    self.lock().retain(|cookie| !matches(cookie));
+  }
+}
+
+fn same_cookie(a: &Cookie, b: &Cookie) -> bool {
+  a.name == b.name && a.domain == b.domain && a.path == b.path
+}
+
+/// A session cookie (`None` or negative `expires`) never expires here.
+fn expired(cookie: &Cookie) -> bool {
+  cookie.expires.is_some_and(|expires| {
+    expires >= 0.0
+      && expires
+        < std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map_or(0.0, |d| d.as_secs_f64())
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn stored(name: &str, value: &str, domain: &str, path: &str, expires: Option<f64>) -> Cookie {
+    Cookie {
+      name: name.into(),
+      value: value.into(),
+      domain: domain.into(),
+      path: path.into(),
+      secure: false,
+      http_only: false,
+      expires,
+      same_site: Some(SameSite::Lax),
+      url: None,
+    }
+  }
+
+  fn names(jar: &CookieJar) -> Vec<String> {
+    jar
+      .all()
+      .into_iter()
+      .map(|c| format!("{}={}", c.name, c.value))
+      .collect()
+  }
+
+  #[test]
+  fn jar_replaces_a_cookie_of_the_same_name_domain_and_path() {
+    let jar = CookieJar::default();
+    jar.add([
+      stored("sid", "one", "example.com", "/", None),
+      stored("sid", "other-path", "example.com", "/app", None),
+      stored("sid", "other-host", "api.example.com", "/", None),
+    ]);
+    jar.add([stored("sid", "two", "example.com", "/", None)]);
+    assert_eq!(names(&jar), ["sid=other-path", "sid=other-host", "sid=two"]);
+  }
+
+  #[test]
+  fn jar_drops_what_has_expired_and_is_deleted_by_an_expired_cookie() {
+    let jar = CookieJar::default();
+    let future = MAX_COOKIE_EXPIRES_SECONDS;
+    jar.add([
+      stored("keep", "1", "example.com", "/", Some(future)),
+      stored("session", "1", "example.com", "/", Some(-1.0)),
+      stored("stale", "1", "example.com", "/", Some(1.0)),
+      stored("gone", "1", "example.com", "/", None),
+    ]);
+    assert_eq!(names(&jar), ["keep=1", "session=1", "gone=1"]);
+    // `Max-Age=0` parses to an expiry at the epoch.
+    jar.add([stored("gone", "", "example.com", "/", Some(0.0))]);
+    assert_eq!(names(&jar), ["keep=1", "session=1"]);
+  }
+
+  #[test]
+  fn jar_removes_by_predicate() {
+    let jar = CookieJar::default();
+    jar.add([
+      stored("a", "1", "example.com", "/", None),
+      stored("b", "1", "acme.test", "/", None),
+    ]);
+    jar.remove(|cookie| cookie.domain == "example.com");
+    assert_eq!(names(&jar), ["b=1"]);
+    jar.remove(|_| true);
+    assert_eq!(names(&jar), Vec::<String>::new());
+  }
 
   fn parse(header: &str, url: &str) -> Option<Cookie> {
     let url = reqwest::Url::parse(url).unwrap();

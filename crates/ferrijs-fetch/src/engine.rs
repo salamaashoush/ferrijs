@@ -5,8 +5,8 @@
 //! reqwest is only the per-hop transport (`redirect::Policy::none()`);
 //! redirect following, cookie bridging, retries, the net-guard per-hop
 //! check, and the timeout budget all live here. Cookies come from the
-//! reqwest jar (standalone) or the browser context (bridged) — the only
-//! difference between the two.
+//! pool's own jar (standalone) or the browser context (bridged) — the
+//! only difference between the two.
 
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -15,40 +15,40 @@ use rustc_hash::FxHashMap;
 
 use super::body::{ByteStream, RequestPayload};
 use super::bridge::ContextBridge;
-use super::cookie::{cookie_matches_url, parse_set_cookie_headers};
+use super::cookie::{Cookie, CookieJar, cookie_matches_url, parse_set_cookie_headers};
 use super::error::FetchError;
 use super::headers::Headers;
-use super::model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType};
+use super::model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType, Timing};
 use super::net_guard::{GuardedResolver, NetGuard, check_url, preflight};
 
-/// reqwest client-cache key: `(ignore_https, dns-guard filter, attach jar)`.
-/// All clients share the pool's redirect policy (`none`); `attach jar`
-/// is `false` for a `credentials: omit` request so no cookies ride it.
-type ClientKey = (bool, Option<(bool, bool)>, bool);
+/// reqwest client-cache key: `(ignore_https, dns-guard filter)`. All
+/// clients share the pool's redirect policy (`none`) and none carries a
+/// cookie jar: the loop reads and writes cookies itself.
+type ClientKey = (bool, Option<(bool, bool)>);
 
 /// A cache of `reqwest::Client`s that differ only in TLS posture and the
 /// DNS-layer guard filter. Every client follows no redirects (the loop
-/// does) and shares the pool's cookie jar, if it has one.
+/// does).
 #[derive(Clone)]
 pub struct ClientPool {
   /// Built on the first request rather than with the pool: a realm per
   /// request pays for a reqwest client (TLS roots, connector, proxy
   /// lookup from the environment) whether or not its script fetches.
   base: Arc<OnceLock<reqwest::Client>>,
-  /// `Some` for a standalone client (reqwest owns the jar); `None` for a
-  /// context-bound client (the browser is the jar).
-  jar: Option<Arc<reqwest::cookie::Jar>>,
+  /// `Some` for a standalone client (the pool owns the jar); `None` for
+  /// a context-bound client (the browser is the jar).
+  jar: Option<Arc<CookieJar>>,
   default_ignore_https: bool,
   variants: Arc<Mutex<FxHashMap<ClientKey, reqwest::Client>>>,
 }
 
 impl ClientPool {
-  /// A standalone pool with its own reqwest cookie jar.
+  /// A standalone pool with its own cookie jar.
   #[must_use]
   pub fn standalone(ignore_https: bool) -> Self {
     Self {
       base: Arc::new(OnceLock::new()),
-      jar: Some(Arc::new(reqwest::cookie::Jar::default())),
+      jar: Some(Arc::new(CookieJar::default())),
       default_ignore_https: ignore_https,
       variants: Arc::new(Mutex::new(FxHashMap::default())),
     }
@@ -65,45 +65,163 @@ impl ClientPool {
     }
   }
 
-  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>, use_jar: bool) -> reqwest::Client {
+  /// The jar of a standalone pool, for a host that reads, fills or
+  /// empties it. `None` for a context-bound pool, whose cookies are the
+  /// host's own.
+  #[must_use]
+  pub fn jar(&self) -> Option<&Arc<CookieJar>> {
+    self.jar.as_ref()
+  }
+
+  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>) -> reqwest::Client {
     let dns = guard.and_then(NetGuard::dns_filter);
-    // Attach the jar only when the request wants credentials AND the pool
-    // owns one (bridged pools have none — cookies ride the browser).
-    let attach_jar = use_jar && self.jar.is_some();
-    if ignore_https == self.default_ignore_https && dns.is_none() && attach_jar == self.jar.is_some() {
+    if ignore_https == self.default_ignore_https && dns.is_none() {
       return self
         .base
-        .get_or_init(|| build_client(self.jar.as_ref(), self.default_ignore_https, None))
+        .get_or_init(|| build_client(self.default_ignore_https, None))
         .clone();
     }
-    let jar = attach_jar.then(|| self.jar.clone()).flatten();
     let mut cache = self.variants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     cache
-      .entry((ignore_https, dns, attach_jar))
-      .or_insert_with(|| build_client(jar.as_ref(), ignore_https, dns))
+      .entry((ignore_https, dns))
+      .or_insert_with(|| build_client(ignore_https, dns))
       .clone()
   }
 }
 
-/// Build a no-redirect reqwest client. `jar` is attached only for the
-/// standalone path; `dns` installs the SSRF address filter.
-fn build_client(
-  jar: Option<&Arc<reqwest::cookie::Jar>>,
-  ignore_https: bool,
-  dns: Option<(bool, bool)>,
-) -> reqwest::Client {
-  let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-  if let Some(jar) = jar {
-    builder = builder.cookie_provider(jar.clone());
+/// Where a request's cookies live.
+#[derive(Clone, Copy)]
+enum Cookies<'a> {
+  /// A host-owned jar, read and written through its bridge.
+  Bridge(&'a Arc<dyn ContextBridge>),
+  /// The pool's own jar.
+  Jar(&'a CookieJar),
+}
+
+impl<'a> Cookies<'a> {
+  fn of(bridge: Option<&'a Arc<dyn ContextBridge>>, pool: &'a ClientPool) -> Option<Self> {
+    match (bridge, pool.jar()) {
+      (Some(bridge), _) => Some(Self::Bridge(bridge)),
+      (None, Some(jar)) => Some(Self::Jar(jar)),
+      (None, None) => None,
+    }
   }
-  if ignore_https {
-    builder = builder.danger_accept_invalid_certs(true);
+
+  async fn read(self) -> Result<Vec<Cookie>, FetchError> {
+    match self {
+      Self::Bridge(bridge) => bridge.cookies().await.map_err(|e| FetchError::Network(e.to_string())),
+      Self::Jar(jar) => Ok(jar.all()),
+    }
   }
-  if let Some((block_metadata, block_private)) = dns {
-    builder = builder.dns_resolver(Arc::new(GuardedResolver {
+}
+
+/// The phases of one hop on the wire, written by the resolver and the
+/// connector as they finish and read back once the response head is in.
+pub(crate) struct HopClock {
+  started: tokio::time::Instant,
+  dns_end: Mutex<Option<Duration>>,
+  connect_end: Mutex<Option<Duration>>,
+}
+
+impl HopClock {
+  fn start() -> Arc<Self> {
+    Arc::new(Self {
+      started: tokio::time::Instant::now(),
+      dns_end: Mutex::new(None),
+      connect_end: Mutex::new(None),
+    })
+  }
+
+  fn mark(&self, phase: &Mutex<Option<Duration>>) {
+    *phase.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.started.elapsed());
+  }
+
+  pub(crate) fn resolved(&self) {
+    self.mark(&self.dns_end);
+  }
+
+  fn connected(&self) {
+    self.mark(&self.connect_end);
+  }
+
+  fn timing(&self, start_time: std::time::SystemTime) -> Timing {
+    let read = |phase: &Mutex<Option<Duration>>| *phase.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    Timing {
+      start_time,
+      dns_end: read(&self.dns_end),
+      connect_end: read(&self.connect_end),
+      response_start: self.started.elapsed(),
+    }
+  }
+}
+
+tokio::task_local! {
+  /// The clock of the hop being sent on this task. The transport resolves
+  /// and connects while the send future is polled, so both find it here;
+  /// a connection the pool already had passes through neither.
+  static HOP_CLOCK: Arc<HopClock>;
+}
+
+/// The clock of the hop this task is sending, if it is sending one.
+pub(crate) fn current_hop() -> Option<Arc<HopClock>> {
+  HOP_CLOCK.try_with(Arc::clone).ok()
+}
+
+/// Wraps the transport's connector to tell the hop when its connection,
+/// TLS handshake included, was established.
+#[derive(Clone)]
+struct ConnectClock<S>(S);
+
+impl<S, R> tower_service::Service<R> for ConnectClock<S>
+where
+  S: tower_service::Service<R>,
+  S::Future: Send + 'static,
+{
+  type Response = S::Response;
+  type Error = S::Error;
+  type Future = std::pin::Pin<Box<dyn Future<Output = Result<S::Response, S::Error>> + Send>>;
+
+  fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    self.0.poll_ready(cx)
+  }
+
+  fn call(&mut self, request: R) -> Self::Future {
+    let clock = current_hop();
+    let connecting = self.0.call(request);
+    Box::pin(async move {
+      let connection = connecting.await;
+      if let (Some(clock), Ok(_)) = (&clock, &connection) {
+        clock.connected();
+      }
+      connection
+    })
+  }
+}
+
+#[derive(Clone)]
+struct ConnectClockLayer;
+
+impl<S> tower_layer::Layer<S> for ConnectClockLayer {
+  type Service = ConnectClock<S>;
+
+  fn layer(&self, inner: S) -> Self::Service {
+    ConnectClock(inner)
+  }
+}
+
+/// Build a no-redirect reqwest client. `dns` is the SSRF address filter.
+fn build_client(ignore_https: bool, dns: Option<(bool, bool)>) -> reqwest::Client {
+  let (block_metadata, block_private) = dns.unwrap_or((false, false));
+  let mut builder = reqwest::Client::builder()
+    .redirect(reqwest::redirect::Policy::none())
+    .tls_info(true)
+    .connector_layer(ConnectClockLayer)
+    .dns_resolver(Arc::new(GuardedResolver {
       block_metadata,
       block_private,
     }));
+  if ignore_https {
+    builder = builder.danger_accept_invalid_certs(true);
   }
   builder.build().unwrap_or_else(|e| {
     // A default client would follow redirects, and the engine drives
@@ -165,12 +283,10 @@ fn follow_budget(redirect: RedirectMode, max_redirects: Option<u32>) -> Option<u
 
 /// The `Cookie` header for one hop.
 ///
-/// `credentials: omit` sends none. The context-bound path assembles it
-/// from the browser jar, except on the first hop when the caller set one
-/// explicitly. The standalone path leaves the header alone (the pool's
-/// reqwest jar fills it in).
+/// `credentials: omit` sends none. Otherwise it is assembled from the
+/// jar, except on the first hop when the caller set one explicitly.
 async fn hop_headers(
-  bridge: Option<&Arc<dyn ContextBridge>>,
+  cookies: Option<Cookies<'_>>,
   credentials: Credentials,
   headers: &Headers,
   request_url: &reqwest::Url,
@@ -181,13 +297,14 @@ async fn hop_headers(
     hop.remove("cookie");
     return Ok(hop);
   }
-  let Some(bridge) = bridge else { return Ok(hop) };
+  let Some(cookies) = cookies else { return Ok(hop) };
   if keep_explicit_cookie {
     return Ok(hop);
   }
   hop.remove("cookie");
-  let context_cookies = bridge.cookies().await.map_err(|e| FetchError::Network(e.to_string()))?;
-  let value = context_cookies
+  let value = cookies
+    .read()
+    .await?
     .iter()
     .filter(|c| cookie_matches_url(c, request_url))
     .map(|c| format!("{}={}", c.name, c.value))
@@ -216,7 +333,7 @@ async fn send_hop(
   deadline: tokio::time::Instant,
   max_retries: u32,
   timeout_message: &str,
-) -> Result<reqwest::Response, FetchError> {
+) -> Result<(reqwest::Response, Timing), FetchError> {
   let mut attempt = 0u32;
   loop {
     let timeout_left = deadline
@@ -235,8 +352,10 @@ async fn send_hop(
     } else if let Some(bytes) = body {
       builder = builder.body(bytes.clone());
     }
-    match builder.send().await {
-      Ok(response) => return Ok(response),
+    let start_time = std::time::SystemTime::now();
+    let clock = HopClock::start();
+    match HOP_CLOCK.scope(Arc::clone(&clock), builder.send()).await {
+      Ok(response) => return Ok((response, clock.timing(start_time))),
       Err(e) if !streamed && attempt < max_retries && is_connection_reset(&e) => {
         attempt += 1;
         tokio::time::sleep(retry_backoff(attempt)).await;
@@ -269,6 +388,60 @@ async fn persist_set_cookies(
       tracing::warn!("context-bound request: dropping Set-Cookie {name:?}: {e}");
     }
   }
+}
+
+/// A request body as the hops send it: buffered bytes every hop
+/// replays, or a stream the first hop consumes.
+fn request_payload(body: super::body::Body) -> Result<(Option<bytes::Bytes>, Option<ByteStream>), FetchError> {
+  match body.into_request_payload() {
+    RequestPayload::Empty => Ok((None, None)),
+    RequestPayload::Bytes(bytes) => Ok((Some(bytes), None)),
+    RequestPayload::Stream(stream) => Ok((None, Some(stream))),
+    RequestPayload::Invalid => Err(FetchError::Body(
+      "a response body cannot be sent as a request body".to_string(),
+    )),
+  }
+}
+
+/// Keep a hop's `Set-Cookie`s where the request's cookies live.
+/// `credentials: omit` stores none in the pool's own jar.
+async fn store_set_cookies(
+  cookies: Option<Cookies<'_>>,
+  credentials: Credentials,
+  request_url: &reqwest::Url,
+  response: &reqwest::Response,
+) {
+  match cookies {
+    Some(Cookies::Bridge(bridge)) => persist_set_cookies(bridge, request_url, response).await,
+    Some(Cookies::Jar(jar)) if credentials != Credentials::Omit => {
+      jar.add(parse_set_cookie_headers(request_url, response.headers()));
+    },
+    _ => {},
+  }
+}
+
+/// The `Authorization` value to send this hop again with, when it was a
+/// `401` Basic challenge to a request that carried none: the answer for
+/// the URL that challenged, asked once. The header then travels as any
+/// other does, kept on a same-origin redirect and dropped on a
+/// cross-origin one.
+fn challenge_answer(
+  challenge: Option<&super::model::ChallengeAnswer>,
+  request_url: &reqwest::Url,
+  sent: &Headers,
+  response: &reqwest::Response,
+) -> Option<String> {
+  if response.status() != reqwest::StatusCode::UNAUTHORIZED || sent.contains("authorization") {
+    return None;
+  }
+  let scheme = response
+    .headers()
+    .get(reqwest::header::WWW_AUTHENTICATE)
+    .and_then(|value| value.to_str().ok())?;
+  if !scheme.trim_start().starts_with("Basic") {
+    return None;
+  }
+  challenge?.answer(request_url)
 }
 
 /// The absolute URL a 3xx points at, or `None` when it carries no
@@ -328,7 +501,7 @@ fn rewrite_for_redirect(
 ///
 /// `bridge` present ⇒ the context-bound path (cookies read from / written
 /// back to the browser per hop). Absent ⇒ the standalone path (the pool's
-/// reqwest jar carries cookies).
+/// own jar carries cookies).
 ///
 /// # Errors
 ///
@@ -352,6 +525,7 @@ pub async fn send(
     timeout,
     ignore_https_errors,
     net_guard,
+    challenge,
   } = req;
 
   let method_str = method.to_string();
@@ -360,25 +534,15 @@ pub async fn send(
   // into the first hop and cannot be replayed, so a redirect that would
   // need to re-send it is a network error (WHATWG: a request whose body
   // is a `ReadableStream` cannot be redirected).
-  let (mut body, mut pending_stream) = match body.into_request_payload() {
-    RequestPayload::Empty => (None, None),
-    RequestPayload::Bytes(b) => (Some(b), None),
-    RequestPayload::Stream(s) => (None, Some(s)),
-    RequestPayload::Invalid => {
-      return Err(FetchError::Body(
-        "a response body cannot be sent as a request body".to_string(),
-      ));
-    },
-  };
+  let (mut body, mut pending_stream) = request_payload(body)?;
   let body_is_streamed = pending_stream.is_some();
 
   let guard = net_guard.as_ref().filter(|g| g.is_active());
   if let Some(g) = guard {
     preflight(&resolved_url, g).map_err(FetchError::from)?;
   }
-  // `credentials: omit` rides a jar-less client so no stored cookie is
-  // sent and no `Set-Cookie` is stored.
-  let client = pool.client(ignore_https_errors, guard, credentials != Credentials::Omit);
+  let client = pool.client(ignore_https_errors, guard);
+  let cookies = Cookies::of(bridge, pool);
 
   let explicit_cookie_header = headers.contains("cookie");
   let mut remaining = follow_budget(redirect, max_redirects);
@@ -387,13 +551,13 @@ pub async fn send(
   let mut first_hop = true;
   let mut hops_followed = 0u32;
 
-  let response = 'redirects: loop {
+  let (response, timing) = 'redirects: loop {
     if let Some(g) = guard {
       check_url(&request_url, g).map_err(FetchError::from)?;
     }
 
     let hop = hop_headers(
-      bridge,
+      cookies,
       credentials,
       &headers,
       &request_url,
@@ -401,7 +565,7 @@ pub async fn send(
     )
     .await?;
 
-    let response = send_hop(
+    let (response, timing) = send_hop(
       &client,
       &method,
       &request_url,
@@ -414,9 +578,7 @@ pub async fn send(
     )
     .await?;
 
-    if let Some(bridge) = bridge {
-      persist_set_cookies(bridge, &request_url, &response).await;
-    }
+    store_set_cookies(cookies, credentials, &request_url, &response).await;
 
     let status = response.status().as_u16();
     if matches!(status, 301 | 302 | 303 | 307 | 308)
@@ -429,7 +591,7 @@ pub async fn send(
       }
       // HTTP-redirect fetch step 4: no Location = return the response.
       let Some(next_url) = redirect_target(&request_url, &response)? else {
-        break 'redirects response;
+        break 'redirects (response, timing);
       };
       // A streamed body was consumed by the hop just sent. Following the
       // redirect would re-send the request with NO body, which the
@@ -448,7 +610,15 @@ pub async fn send(
       continue;
     }
 
-    break 'redirects response;
+    // A streamed body is gone and cannot be sent again.
+    if !body_is_streamed
+      && let Some(authorization) = challenge_answer(challenge.as_ref(), &request_url, &hop, &response)
+    {
+      headers.set("authorization", authorization);
+      continue;
+    }
+
+    break 'redirects (response, timing);
   };
 
   if redirect == RedirectMode::Error && response.status().is_redirection() {
@@ -456,7 +626,7 @@ pub async fn send(
       "{method_str} {resolved_url}: unexpected redirect (redirect: \"error\")"
     )));
   }
-  Ok(into_response(response, &request_url, redirect, hops_followed))
+  Ok(into_response(response, &request_url, redirect, hops_followed, timing))
 }
 
 /// Turn the final reqwest response into the typed [`Response`], applying
@@ -466,6 +636,7 @@ fn into_response(
   request_url: &reqwest::Url,
   redirect: RedirectMode,
   hops_followed: u32,
+  timing: Timing,
 ) -> Response {
   let status = response.status().as_u16();
   let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
@@ -480,6 +651,11 @@ fn into_response(
     .collect::<Vec<_>>()
     .into();
   let unfollowed_redirect = redirect == RedirectMode::Manual && response.status().is_redirection();
+  let peer_certificate = response
+    .extensions()
+    .get::<reqwest::tls::TlsInfo>()
+    .and_then(reqwest::tls::TlsInfo::peer_certificate)
+    .map(<[u8]>::to_vec);
   Response {
     status,
     status_text,
@@ -494,6 +670,8 @@ fn into_response(
     } else {
       ResponseType::Basic
     },
+    timing,
+    peer_certificate,
   }
 }
 
