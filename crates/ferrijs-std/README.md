@@ -686,3 +686,16 @@ the extension that needs it.
     key's point on the Edwards curve; it derived every key as X25519.
     `crates/ferrijs/tests/node_crypto_keys.rs` holds every encoding and
     deterministic signature to what Node 24 prints for fixed keys.
+
+48. **`fs/realpath.rs` — `realpath` and `realpathSync`.** Upstream ships
+    neither, so a script that resolves a symlinked path failed at import
+    with a missing export. Both answer the path as the operating system
+    resolves it, without the `\\?\` prefix Windows puts on a canonical
+    one, and fail with Node's `code`, `errno`, `syscall` and `path`
+    (`lstat` for the synchronous form, `realpath` for the promise, as in
+    Node). `encoding: 'buffer'` is refused with a `TypeError` rather than
+    ignored. `guard.rs` checks the read grant in front of both, and that
+    check follows symlinks itself, so a link inside a granted directory
+    cannot be used to learn about a path outside it. The file is ours: a
+    re-sync leaves it alone, and only its `mod` line and registrations in
+    `fs/mod.rs` need re-adding.

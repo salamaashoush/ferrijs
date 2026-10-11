@@ -21,6 +21,7 @@ use super::mkdir::{mkdir, mkdir_sync, mkdtemp, mkdtemp_sync};
 use super::open::open;
 use super::read_dir::{read_dir, read_dir_sync, ReadDir};
 use super::read_file::{read_file, read_file_sync, ReadFileOptions};
+use super::realpath::{realpath, realpath_sync};
 use super::rename::{rename, rename_sync};
 use super::rm::{rmdir, rmdir_sync, rmfile, rmfile_sync};
 use super::stats::{lstat_fn, lstat_fn_sync, stat_fn, stat_fn_sync, Stats};
@@ -69,6 +70,24 @@ pub(super) fn append_file_sync_guarded<'js>(
 ) -> Result<()> {
     check_write(&ctx, Path::new(&path))?;
     append_file_sync(ctx, path, bytes, options)
+}
+
+pub(super) async fn realpath_guarded<'js>(
+    ctx: Ctx<'js>,
+    path: String,
+    options: Opt<Value<'js>>,
+) -> Result<String> {
+    check_read(&ctx, Path::new(&path))?;
+    realpath(ctx, path, options).await
+}
+
+pub(super) fn realpath_sync_guarded<'js>(
+    ctx: Ctx<'js>,
+    path: String,
+    options: Opt<Value<'js>>,
+) -> Result<String> {
+    check_read(&ctx, Path::new(&path))?;
+    realpath_sync(ctx, path, options)
 }
 
 pub(super) async fn chmod_guarded(ctx: Ctx<'_>, path: String, mode: u32) -> Result<()> {

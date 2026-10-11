@@ -149,6 +149,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 # `tty` calls `isatty` on every platform, so this is not unix-only.
 libc = { workspace = true }
+# `fs.realpath` answers a path without the `\\?\` prefix Windows puts on
+# a canonical one.
+dunce = "1"
 
 
 # `utils/signals.rs` calls OpenProcess/TerminateProcess/CloseHandle and

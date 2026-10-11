@@ -49,6 +49,7 @@ sourcemap = "9"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+dunce = "1"
 tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 criterion = { workspace = true }

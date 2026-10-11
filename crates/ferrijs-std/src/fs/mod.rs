@@ -9,6 +9,7 @@ mod mkdir;
 mod open;
 mod read_dir;
 mod read_file;
+mod realpath;
 mod rename;
 mod rm;
 mod stats;
@@ -41,6 +42,7 @@ impl ModuleDef for FsPromisesModule {
         declare.declare("appendFile")?;
         declare.declare("open")?;
         declare.declare("readFile")?;
+        declare.declare("realpath")?;
         declare.declare("writeFile")?;
         declare.declare("rename")?;
         declare.declare("readdir")?;
@@ -87,6 +89,7 @@ impl ModuleDef for FsModule {
         declare.declare("mkdtempSync")?;
         declare.declare("readdirSync")?;
         declare.declare("readFileSync")?;
+        declare.declare("realpathSync")?;
         declare.declare("existsSync")?;
         declare.declare("rmdirSync")?;
         declare.declare("rmSync")?;
@@ -120,7 +123,8 @@ pub fn fill_fs<'js>(ctx: &Ctx<'js>, target: &Object<'js>) -> Result<()> {
 
     // LOCAL DELTA: every entry point is the guarded wrapper from
     // `guard.rs`, and `existsSync` (which upstream lacks) lives there
-    // too. See that file. `appendFileSync` is ours, from `append_file.rs`.
+    // too. See that file. `appendFileSync` is ours, from `append_file.rs`,
+    // and `realpathSync` from `realpath.rs`.
     target.set("promises", promises)?;
     target.set("accessSync", Func::from(access_sync_guarded))?;
     target.set("appendFileSync", Func::from(append_file_sync_guarded))?;
@@ -128,6 +132,7 @@ pub fn fill_fs<'js>(ctx: &Ctx<'js>, target: &Object<'js>) -> Result<()> {
     target.set("mkdtempSync", Func::from(mkdtemp_sync_guarded))?;
     target.set("readdirSync", Func::from(read_dir_sync_guarded))?;
     target.set("readFileSync", Func::from(read_file_sync_guarded))?;
+    target.set("realpathSync", Func::from(realpath_sync_guarded))?;
     target.set("existsSync", Func::from(exists_sync_guarded))?;
     target.set("rmdirSync", Func::from(rmdir_sync_guarded))?;
     target.set("rmSync", Func::from(rmfile_sync_guarded))?;
@@ -209,6 +214,7 @@ fn export_promises<'js>(ctx: &Ctx<'js>, exports: &Object<'js>) -> Result<()> {
     exports.set("appendFile", Func::from(Async(append_file_guarded)))?;
     exports.set("open", Func::from(Async(open_guarded)))?;
     exports.set("readFile", Func::from(Async(read_file_guarded)))?;
+    exports.set("realpath", Func::from(Async(realpath_guarded)))?;
     exports.set("writeFile", Func::from(Async(write_file_guarded)))?;
     exports.set("rename", Func::from(Async(rename_guarded)))?;
     exports.set("readdir", Func::from(Async(read_dir_guarded)))?;

@@ -1074,6 +1074,7 @@ version = "0.7.0"
 dependencies = [
  "bytes",
  "criterion",
+ "dunce",
  "ferrijs-fetch",
  "ferrijs-permissions",
  "ferrijs-serde",
@@ -1176,6 +1177,7 @@ dependencies = [
  "crc32fast",
  "cshake",
  "der",
+ "dunce",
  "either",
  "ferrijs-permissions",
  "flate2",
