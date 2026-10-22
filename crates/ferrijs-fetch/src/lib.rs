@@ -13,6 +13,7 @@
 //! - [`net_guard`] — SSRF policy (allow-list, metadata/private blocking).
 //! - [`cookie`] — RFC 6265 parsing/matching, and the standalone jar.
 //! - [`multipart`] — `multipart/form-data` serialization and parsing.
+//! - [`proxy`] — the HTTP or SOCKS proxy a pool's requests leave through.
 //! - [`bridge`] — the two-way cookie/defaults bridge to a host-owned jar
 //!   (a browser context, a session store).
 //! - [`cookie`] also carries the [`Cookie`] record that bridge speaks.
@@ -26,6 +27,7 @@ pub mod headers;
 pub mod model;
 pub mod multipart;
 pub mod net_guard;
+pub mod proxy;
 
 pub use body::{Body, ByteStream, channel_stream};
 pub use bridge::{BridgeFuture, ContextBridge, ContextDefaults};
@@ -37,6 +39,7 @@ pub use multipart::{
   MultipartField, MultipartValue, multipart_boundary, multipart_boundary_of, parse_multipart, serialize_multipart,
 };
 pub use net_guard::{GuardError, NetGuard, NetPolicy, check_url, preflight};
+pub use proxy::Proxy;
 /// The transport crate, for a host that needs its `Url` / `Method`.
 pub use reqwest;
 

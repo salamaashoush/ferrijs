@@ -20,6 +20,7 @@ use super::error::FetchError;
 use super::headers::Headers;
 use super::model::{Credentials, RedirectMode, RemoteAddr, Request, Response, ResponseType, Timing};
 use super::net_guard::{GuardedResolver, NetGuard, check_url, preflight};
+use super::proxy::Proxy;
 
 /// reqwest client-cache key: `(ignore_https, dns-guard filter)`. All
 /// clients share the pool's redirect policy (`none`) and none carries a
@@ -40,6 +41,9 @@ pub struct ClientPool {
   jar: Option<Arc<CookieJar>>,
   default_ignore_https: bool,
   variants: Arc<Mutex<FxHashMap<ClientKey, reqwest::Client>>>,
+  /// `None` leaves reqwest's own choice, the `HTTP(S)_PROXY`/`NO_PROXY`
+  /// environment.
+  proxy: Option<Proxy>,
 }
 
 impl ClientPool {
@@ -51,6 +55,7 @@ impl ClientPool {
       jar: Some(Arc::new(CookieJar::default())),
       default_ignore_https: ignore_https,
       variants: Arc::new(Mutex::new(FxHashMap::default())),
+      proxy: None,
     }
   }
 
@@ -62,7 +67,31 @@ impl ClientPool {
       jar: None,
       default_ignore_https: false,
       variants: Arc::new(Mutex::new(FxHashMap::default())),
+      proxy: None,
     }
+  }
+
+  /// The same pool sending every request through `proxy`. Settings that do
+  /// not describe a proxy fail each request with
+  /// [`FetchError::InvalidUrl`]; [`Proxy::validate`] reports that earlier.
+  ///
+  /// The proxy resolves the names it is handed, so a [`NetGuard`]'s
+  /// per-address check sees only the proxy's own address; its URL checks
+  /// still run on every hop.
+  #[must_use]
+  pub fn with_proxy(self, proxy: Option<Proxy>) -> Self {
+    Self {
+      base: Arc::new(OnceLock::new()),
+      variants: Arc::new(Mutex::new(FxHashMap::default())),
+      proxy,
+      ..self
+    }
+  }
+
+  /// The proxy this pool sends through, if one was set.
+  #[must_use]
+  pub fn proxy(&self) -> Option<&Proxy> {
+    self.proxy.as_ref()
   }
 
   /// The jar of a standalone pool, for a host that reads, fills or
@@ -73,19 +102,24 @@ impl ClientPool {
     self.jar.as_ref()
   }
 
-  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>) -> reqwest::Client {
+  fn client(&self, ignore_https: bool, guard: Option<&NetGuard>) -> Result<reqwest::Client, FetchError> {
+    let transport = self.proxy.as_ref().map(Proxy::to_transport).transpose()?;
     let dns = guard.and_then(NetGuard::dns_filter);
     if ignore_https == self.default_ignore_https && dns.is_none() {
-      return self
-        .base
-        .get_or_init(|| build_client(self.default_ignore_https, None))
-        .clone();
+      return Ok(
+        self
+          .base
+          .get_or_init(|| build_client(self.default_ignore_https, None, transport))
+          .clone(),
+      );
     }
     let mut cache = self.variants.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-      .entry((ignore_https, dns))
-      .or_insert_with(|| build_client(ignore_https, dns))
-      .clone()
+    Ok(
+      cache
+        .entry((ignore_https, dns))
+        .or_insert_with(|| build_client(ignore_https, dns, transport))
+        .clone(),
+    )
   }
 }
 
@@ -210,7 +244,7 @@ impl<S> tower_layer::Layer<S> for ConnectClockLayer {
 }
 
 /// Build a no-redirect reqwest client. `dns` is the SSRF address filter.
-fn build_client(ignore_https: bool, dns: Option<(bool, bool)>) -> reqwest::Client {
+fn build_client(ignore_https: bool, dns: Option<(bool, bool)>, proxy: Option<reqwest::Proxy>) -> reqwest::Client {
   let (block_metadata, block_private) = dns.unwrap_or((false, false));
   let mut builder = reqwest::Client::builder()
     .redirect(reqwest::redirect::Policy::none())
@@ -222,6 +256,9 @@ fn build_client(ignore_https: bool, dns: Option<(bool, bool)>) -> reqwest::Clien
     }));
   if ignore_https {
     builder = builder.danger_accept_invalid_certs(true);
+  }
+  if let Some(proxy) = proxy {
+    builder = builder.proxy(proxy);
   }
   builder.build().unwrap_or_else(|e| {
     // A default client would follow redirects, and the engine drives
@@ -541,7 +578,7 @@ pub async fn send(
   if let Some(g) = guard {
     preflight(&resolved_url, g).map_err(FetchError::from)?;
   }
-  let client = pool.client(ignore_https_errors, guard);
+  let client = pool.client(ignore_https_errors, guard)?;
   let cookies = Cookies::of(bridge, pool);
 
   let explicit_cookie_header = headers.contains("cookie");
