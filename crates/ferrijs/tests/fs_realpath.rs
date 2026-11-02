@@ -28,7 +28,7 @@ async fn a_path_is_answered_as_the_system_resolves_it() -> Result<(), Box<dyn st
     .build()
     .await?;
 
-  let real = serde_json::json!(root.join("inner/real.txt"));
+  let real = serde_json::json!(root.join("inner").join("real.txt"));
   assert_eq!(
     both(&rt, &root.join("inner/../inner/./real.txt")).await?,
     serde_json::json!({ "sync": real, "promised": real })
