@@ -66,12 +66,12 @@ fn get_home_dir(ctx: Ctx<'_>) -> Result<String> {
 
 #[cfg(feature = "system")]
 fn get_host_name(ctx: Ctx<'_>) -> Result<String> {
-    System::host_name().ok_or_else(|| Exception::throw_reference(&ctx, "System::host_name"))
+    System::host_name().map_err(|_| Exception::throw_reference(&ctx, "System::host_name"))
 }
 
 #[cfg(feature = "system")]
 fn get_load_avg() -> Vec<f64> {
-    let load_avg = System::load_average();
+    let load_avg = System::load_average().unwrap_or_default();
 
     vec![load_avg.one, load_avg.five, load_avg.fifteen]
 }
@@ -87,7 +87,7 @@ fn get_tmp_dir() -> String {
 
 #[cfg(feature = "system")]
 fn get_uptime() -> u64 {
-    System::uptime()
+    System::uptime().unwrap_or(0)
 }
 
 pub struct OsModule;

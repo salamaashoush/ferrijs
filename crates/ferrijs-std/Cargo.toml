@@ -106,14 +106,14 @@ ml-kem = { version = "0.3", features = ["alloc", "pkcs8"], default-features = fa
 # The one C crypto library in the tree. A host that also speaks TLS links the
 # same aws-lc-sys through rustls, so there is a single copy of AWS-LC in the
 # binary rather than a second, vendored OpenSSL beside it.
-aws-lc-rs = { version = "1.18" }
+aws-lc-rs = { version = "1.19" }
 # Exact: a caret requirement on a release candidate admits the next one, and
 # rc.5 made the key types generic, so `^0.8.0-rc.4` let a fresh resolve of
 # a published ferrijs-std pick a pkcs1 it does not compile against.
 pkcs1 = { version = "=0.8.0-rc.5", features = ["alloc"], default-features = false }
 pkcs8 = { version = "0.11", features = ["alloc"], default-features = false }
 rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
-simd-json = { version = "0.18", features = ["big-int-as-float"], default-features = false }
+simd-json = { version = "0.19", features = ["big-int-as-float"], default-features = false }
 spki = { version = "0.8", features = ["alloc"], default-features = false }
 shake = { version = "0.1", default-features = false }
 sponge-cursor = { version = "0.1", default-features = false }
@@ -128,7 +128,7 @@ home = { version = "0.5", default-features = false }
 memchr = "2"
 num_cpus = { version = "1", default-features = false }
 once_cell = { version = "1", features = ["std"], default-features = false }
-sysinfo = { version = "0.39", default-features = false, optional = true }
+sysinfo = { version = "0.40", default-features = false, optional = true }
 # `half` backs `Float16Array`, which the vendored BYOB reader and
 # `ObjectBytes` handle as of the latest llrt sync.
 rquickjs = { workspace = true }

@@ -1,17 +1,20 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 use rquickjs::{Ctx, Object, Result};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 
-static SYSTEM: Lazy<Arc<Mutex<System>>> = Lazy::new(|| {
-    Arc::new(Mutex::new(System::new_with_specifics(
+// `None` where sysinfo cannot read this system: no CPUs and no memory, as before 0.40.
+static SYSTEM: Lazy<Option<Mutex<System>>> = Lazy::new(|| {
+    System::new_with_specifics(
         RefreshKind::nothing()
-            .with_cpu(CpuRefreshKind::nothing().with_cpu_usage().with_frequency())
+            .with_cpu(CpuRefreshKind::nothing().with_usage().with_frequency())
             .with_memory(MemoryRefreshKind::nothing().with_ram()),
-    )))
+    )
+    .ok()
+    .map(Mutex::new)
 });
 
 /// Cumulative milliseconds one logical CPU spent in each mode, in Node's
@@ -196,7 +199,10 @@ fn cpu_times() -> Vec<CpuTimes> {
 
 pub fn get_cpus(ctx: Ctx<'_>) -> Result<Vec<Object<'_>>> {
     let mut vec: Vec<Object> = Vec::new();
-    let system = SYSTEM.lock().unwrap();
+    let Some(system) = SYSTEM.as_ref() else {
+        return Ok(vec);
+    };
+    let system = system.lock().unwrap();
     let times = cpu_times();
 
     for (index, cpu) in system.cpus().iter().enumerate() {
@@ -219,15 +225,17 @@ pub fn get_cpus(ctx: Ctx<'_>) -> Result<Vec<Object<'_>>> {
 }
 
 pub fn get_free_mem() -> u64 {
-    let mut system = SYSTEM.lock().unwrap();
-
-    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-    system.free_memory()
+    with_fresh_memory(System::free_memory)
 }
 
 pub fn get_total_mem() -> u64 {
-    let mut system = SYSTEM.lock().unwrap();
+    with_fresh_memory(System::total_memory)
+}
 
-    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-    system.total_memory()
+fn with_fresh_memory(read: fn(&System) -> u64) -> u64 {
+    SYSTEM.as_ref().map_or(0, |system| {
+        let mut system = system.lock().unwrap();
+        system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        read(&system)
+    })
 }

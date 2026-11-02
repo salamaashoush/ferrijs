@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr},
-    sync::{Arc, Mutex},
+    sync::Mutex,
 };
 
 use crate::utils::result::ResultExt;
@@ -11,12 +11,16 @@ use once_cell::sync::Lazy;
 use rquickjs::{Ctx, Object, Result};
 use sysinfo::Networks;
 
-static NETWORKS: Lazy<Arc<Mutex<Networks>>> =
-    Lazy::new(|| Arc::new(Mutex::new(Networks::new_with_refreshed_list())));
+// `None` where sysinfo cannot list interfaces, which answers an empty map.
+static NETWORKS: Lazy<Option<Mutex<Networks>>> =
+    Lazy::new(|| Networks::new_with_refreshed_list().ok().map(Mutex::new));
 
 pub fn get_network_interfaces(ctx: Ctx<'_>) -> Result<HashMap<String, Vec<Object<'_>>>> {
     let mut map: HashMap<String, Vec<Object>> = HashMap::new();
-    let networks = NETWORKS.lock().unwrap();
+    let Some(networks) = NETWORKS.as_ref() else {
+        return Ok(map);
+    };
+    let networks = networks.lock().unwrap();
 
     for (interface_name, network_data) in networks.iter() {
         let mut ifs = Vec::new();
@@ -52,7 +56,7 @@ pub fn get_network_interfaces(ctx: Ctx<'_>) -> Result<HashMap<String, Vec<Object
             ifs.push(obj);
         }
         if !ifs.is_empty() {
-            map.insert(interface_name.to_string(), ifs);
+            map.insert(interface_name.to_string_lossy().into_owned(), ifs);
         }
     }
     Ok(map)

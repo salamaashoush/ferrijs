@@ -699,3 +699,11 @@ the extension that needs it.
     cannot be used to learn about a path outside it. The file is ours: a
     re-sync leaves it alone, and only its `mod` line and registrations in
     `fs/mod.rs` need re-adding.
+
+49. **`os` on sysinfo 0.40.** Upstream stays on 0.39. 0.40 made the
+    `System` and `Networks` constructors, `host_name`, `load_average` and
+    `uptime` fallible, renamed `with_cpu_usage` to `with_usage`, and names
+    interfaces with an `OsString`. Where sysinfo cannot read the system,
+    `cpus()` is empty, memory reads 0, `networkInterfaces()` is empty and
+    `loadavg()` and `uptime()` are 0, as 0.39 answered; `hostname()` still
+    throws.
