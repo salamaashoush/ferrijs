@@ -659,6 +659,7 @@ impl Runtime {
 
       let fail =
         |what: &str, e: rquickjs::Error| ScriptError::internal(format!("failed to install {what}: {}", thrown(&ctx, e)));
+      crate::realm::seed_random(&ctx).map_err(|e| fail("Math.random", e))?;
       if realm.lazy_globals {
         ferrijs_std::init_lazy(&ctx)
       } else {

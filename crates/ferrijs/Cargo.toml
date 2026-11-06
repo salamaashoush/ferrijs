@@ -46,6 +46,7 @@ tracing = { workspace = true }
 rustc-hash = { workspace = true }
 bytes = { workspace = true, optional = true }
 sourcemap = "9"
+rand = { version = "0.10", features = ["std", "std_rng", "thread_rng"], default-features = false }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1081,6 +1081,7 @@ dependencies = [
  "ferrijs-std",
  "futures",
  "libmimalloc-sys",
+ "rand",
  "rquickjs",
  "rustc-hash",
  "schemars",

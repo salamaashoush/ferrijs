@@ -11,7 +11,8 @@
 //! `Function.prototype.constructor` is reachable from any function and
 //! the async and generator constructors are separate objects.
 
-use rquickjs::{Ctx, Object, Value};
+use rand::RngExt as _;
+use rquickjs::{Ctx, Function, Object, Value, object::Property};
 
 /// How the realm is shaped after the extensions install.
 #[derive(Debug, Clone)]
@@ -57,6 +58,21 @@ impl Default for RealmOptions {
       lazy_globals: true,
     }
   }
+}
+
+/// Replace `Math.random`, which the engine seeds from the microsecond
+/// clock as it makes the realm: realms made in the same microsecond, as
+/// a test runner's workers starting together are, draw the same numbers.
+/// The replacement draws from the thread's generator, which the
+/// operating system seeds. Runs first, so every install sees it.
+///
+/// # Errors
+///
+/// Propagates the property write.
+pub fn seed_random(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  let math: Object<'_> = ctx.globals().get("Math")?;
+  let random = Function::new(ctx.clone(), || rand::rng().random::<f64>())?.with_name("random")?;
+  math.prop("random", Property::from(random).writable().configurable())
 }
 
 /// Apply the lockdown. Runs last at realm creation, after every
