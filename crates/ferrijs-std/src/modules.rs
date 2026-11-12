@@ -25,9 +25,12 @@ fn export_from<'js>(exports: &Exports<'js>, ns: &Object<'js>, names: &[&str]) ->
   Ok(())
 }
 
-/// `import path from 'node:path'` — pure-computation POSIX-style subset
-/// (the sandbox is always a unix-style path space).
+/// `import path from 'node:path'`: the host's flavour of Node's `path`.
 pub struct PathModule;
+/// `import posix from 'node:path/posix'`.
+pub struct PathPosixModule;
+/// `import win32 from 'node:path/win32'`.
+pub struct PathWin32Module;
 
 const PATH_MEMBERS: &[&str] = &[
   "join",
@@ -41,45 +44,61 @@ const PATH_MEMBERS: &[&str] = &[
   "parse",
   "format",
   "toNamespacedPath",
+  "_makeLong",
   "posix",
-  "sep",
-  "delimiter",
-];
-const PATH_EXPORTS: &[&str] = &[
-  "default",
-  "join",
-  "resolve",
-  "dirname",
-  "basename",
-  "extname",
-  "normalize",
-  "relative",
-  "isAbsolute",
-  "parse",
-  "format",
-  "toNamespacedPath",
-  "posix",
+  "win32",
   "sep",
   "delimiter",
 ];
 
-fn path_namespace<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-  let obj = crate::node::path::path_object(ctx)?;
-  let ns = Object::new(ctx.clone())?;
-  ns.set("default", obj.clone())?;
-  for name in PATH_MEMBERS {
-    ns.set(*name, obj.get::<_, Value<'js>>(*name)?)?;
+/// `require('path')`, `require('path/posix')` or `require('path/win32')`:
+/// the flavour object itself, as Node hands it out.
+fn path_flavour<'js>(ctx: &Ctx<'js>, flavour: Option<&str>) -> rquickjs::Result<Object<'js>> {
+  let path = crate::node::path::path_object(ctx)?;
+  match flavour {
+    Some(name) => path.get(name),
+    None => Ok(path),
   }
-  Ok(ns)
+}
+
+fn declare_path(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+  decl.declare("default")?;
+  declare_all(decl, PATH_MEMBERS)
+}
+
+fn export_path<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>, flavour: Option<&str>) -> rquickjs::Result<()> {
+  let path = path_flavour(ctx, flavour)?;
+  exports.export("default", path.clone())?;
+  export_from(exports, &path, PATH_MEMBERS)
 }
 
 impl ModuleDef for PathModule {
   fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
-    declare_all(decl, PATH_EXPORTS)
+    declare_path(decl)
   }
 
   fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
-    export_from(exports, &path_namespace(ctx)?, PATH_EXPORTS)
+    export_path(ctx, exports, None)
+  }
+}
+
+impl ModuleDef for PathPosixModule {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    declare_path(decl)
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    export_path(ctx, exports, Some("posix"))
+  }
+}
+
+impl ModuleDef for PathWin32Module {
+  fn declare(decl: &Declarations<'_>) -> rquickjs::Result<()> {
+    declare_path(decl)
+  }
+
+  fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> rquickjs::Result<()> {
+    export_path(ctx, exports, Some("win32"))
   }
 }
 
@@ -380,7 +399,17 @@ pub fn modules() -> Vec<NodeModule> {
     NodeModule {
       specifiers: &["path", "node:path"],
       declare: declare_fn::<PathModule>(),
-      namespace: path_namespace,
+      namespace: |ctx| path_flavour(ctx, None),
+    },
+    NodeModule {
+      specifiers: &["path/posix", "node:path/posix"],
+      declare: declare_fn::<PathPosixModule>(),
+      namespace: |ctx| path_flavour(ctx, Some("posix")),
+    },
+    NodeModule {
+      specifiers: &["path/win32", "node:path/win32"],
+      declare: declare_fn::<PathWin32Module>(),
+      namespace: |ctx| path_flavour(ctx, Some("win32")),
     },
     NodeModule {
       specifiers: &["buffer", "node:buffer"],
