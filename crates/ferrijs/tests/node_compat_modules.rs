@@ -58,7 +58,7 @@ async fn bundled_module_uses_native_fs_path_buffer() {
       "viaDefault": "hello-node-compat",
       "viaNamed": "hello-node-compat",
       "viaPromises": "hello-node-compat",
-      "joined": "b/c.txt",
+      "joined": host_path("b/c.txt"),
       "ext": ".txt",
       "b64": "aGk=",
       "round": "hi"
@@ -89,7 +89,7 @@ async fn dynamic_import_resolves_native_modules_in_plain_scripts() {
     ok(run),
     serde_json::json!({
       "dir": "/a/b",
-      "rel": "../d",
+      "rel": host_path("../d"),
       "hex": "dead",
       "isBuf": true,
     })
@@ -322,4 +322,14 @@ async fn performance_now_and_process_hrtime_share_one_base() {
     "performance.now() ({now}ms) fell outside the hrtime readings around it \
      ({before}ms..{after}ms), so they are not counting from the same base"
   );
+}
+
+/// `node:path` is the host's flavour, as in Node: win32 joins and
+/// relativises with `\\` on Windows.
+fn host_path(posix: &str) -> String {
+  if cfg!(windows) {
+    posix.replace('/', "\\")
+  } else {
+    posix.to_owned()
+  }
 }

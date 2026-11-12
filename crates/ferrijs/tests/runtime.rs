@@ -252,7 +252,7 @@ async fn web_globals_and_node_modules_are_served() {
   assert_eq!(
     ok(&run),
     &serde_json::json!({
-      "joined": "a/b", "b64": "aGk=", "host": "example.com", "q": "1", "hashLen": 32,
+      "joined": if cfg!(windows) { "a\\b" } else { "a/b" }, "b64": "aGk=", "host": "example.com", "q": "1", "hashLen": 32,
       "ab": "x", "clone": { "a": [1] }, "hasFetch": "function", "hasHeaders": "function", "version": true,
       "release": "ferrijs", "ua": true,
     })
