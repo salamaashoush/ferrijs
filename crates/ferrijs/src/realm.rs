@@ -75,6 +75,51 @@ pub fn seed_random(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   math.prop("random", Property::from(random).writable().configurable())
 }
 
+/// Give `Date` the host's wall clock. QuickJS reads it on Windows through
+/// `GetSystemTime`, which moves in 15.6 ms steps, so `Date.now()` lagged
+/// the time a host-side value (a response's `startTime`) was stamped
+/// with; Node's is exact to the millisecond. Elsewhere QuickJS already
+/// asks `gettimeofday`, and this does nothing.
+///
+/// # Errors
+///
+/// Propagates the install.
+pub fn precise_date(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  if !cfg!(windows) {
+    return Ok(());
+  }
+  let now = Function::new(ctx.clone(), || {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0.0, |since| (since.as_secs_f64() * 1000.0).floor())
+  })?
+  .with_name("now")?;
+  let mut options = rquickjs::context::EvalOptions::default();
+  options.filename = Some(INTERNAL_FILE.to_string());
+  let install: Function<'_> = ctx.eval_with_options(PRECISE_DATE, options)?;
+  install.call((now,))
+}
+
+/// `Date` replaced by a constructor that shares the real prototype, as in
+/// [`TAME_CLOCKS`], reading "now" from `hostNow`.
+const PRECISE_DATE: &str = r#"
+(hostNow) => {
+  const RealDate = Date;
+  function Date_(...args) {
+    if (!new.target) return new RealDate(hostNow()).toString();
+    return Reflect.construct(RealDate, args.length === 0 ? [hostNow()] : args, new.target);
+  }
+  Date_.prototype = RealDate.prototype;
+  Object.defineProperty(RealDate.prototype, "constructor", { value: Date_, writable: true, configurable: true });
+  Object.defineProperty(Date_, "name", { value: "Date" });
+  Object.defineProperty(Date_, "length", { value: 7 });
+  Object.defineProperty(Date_, "now", { value: hostNow, writable: true, configurable: true });
+  Object.defineProperty(Date_, "parse", { value: RealDate.parse, writable: true, configurable: true });
+  Object.defineProperty(Date_, "UTC", { value: RealDate.UTC, writable: true, configurable: true });
+  Object.defineProperty(globalThis, "Date", { value: Date_, writable: true, configurable: true });
+}
+"#;
+
 /// Apply the lockdown. Runs last at realm creation, after every
 /// extension, so nothing installed afterwards can undo it.
 ///
