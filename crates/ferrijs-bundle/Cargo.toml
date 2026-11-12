@@ -22,13 +22,13 @@ rquickjs = { workspace = true }
 # `Pluginable` from a trait into a struct), so a caret requirement lets a
 # fresh resolve of a published ferrijs-bundle pick one it does not compile
 # against. Move all four together.
-rolldown = "=1.3.0"
-rolldown_common = "=1.3.0"
-rolldown_plugin = "=1.3.0"
+rolldown = "=1.3.2"
+rolldown_common = "=1.3.2"
+rolldown_plugin = "=1.3.2"
 # A bundle failure's own diagnostics. `BatchedBuildDiagnostic`'s Debug
 # elides the label spans, so the file and line a parse error points at
 # are only reachable through `to_diagnostic()`.
-rolldown_error = "=1.3.0"
+rolldown_error = "=1.3.2"
 # `canonicalize` answers `\\?\C:\...` on Windows, which rolldown resolves
 # as no module at all.
 dunce = "1"
