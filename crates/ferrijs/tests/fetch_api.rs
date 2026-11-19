@@ -377,6 +377,22 @@ async fn fetch_accepts_a_request_instance() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fetch_and_request_take_a_url_object_as_its_href() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const direct = await (await fetch(new URL('/by-url?q=1', '{url}'))).json(); \
+     const viaRequest = new Request(new URL('{url}/as-request')); \
+     const sent = await (await fetch(viaRequest)).json(); \
+     return {{ direct: direct.path, request: viaRequest.url, sent: sent.path }};"
+  ))
+  .await;
+  assert_eq!(
+    val(&o),
+    &serde_json::json!({ "direct": "/by-url?q=1", "request": format!("{url}/as-request"), "sent": "/as-request" })
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn abort_controller_signal_and_listeners() {
   let o = run(
     "const c = new AbortController(); const s = c.signal; \

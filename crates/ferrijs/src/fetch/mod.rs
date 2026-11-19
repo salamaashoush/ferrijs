@@ -1094,7 +1094,7 @@ impl<'js> FetchRequestJs<'js> {
       }
     } else {
       Self {
-        url: input.as_string().and_then(|s| s.to_string().ok()).unwrap_or_default(),
+        url: input_url(&input)?,
         method: "GET".to_string(),
         headers: CoreHeaders::new(),
         body: Vec::new(),
@@ -1452,12 +1452,10 @@ fn do_fetch<'js>(
         "Cannot fetch a Request whose body has already been read",
       ));
     }
-    let url = req
-      .as_ref()
-      .map(|r| r.borrow().url.clone())
-      .or_else(|| input.as_string().and_then(|s| s.to_string().ok()))
-      .or_else(|| input.as_object().and_then(|o| o.get::<_, String>("url").ok()))
-      .unwrap_or_default();
+    let url = match req.as_ref() {
+      Some(r) => r.borrow().url.clone(),
+      None => input_url(&input)?,
+    };
     // The realm's container, composed with whatever the backend adds,
     // taken synchronously inside the call so the backend sees the
     // caller's context. The cloud metadata endpoints are blocked for
@@ -1629,4 +1627,21 @@ fn fetch_failure(ctx: &Ctx<'_>, error: ferrijs_fetch::FetchError) -> rquickjs::E
     ferrijs_fetch::FetchError::Abort(reason) => abort_error(ctx, reason),
     other => crate::value::type_error(ctx, other.to_string()),
   }
+}
+
+/// The URL a `fetch` / `new Request` input that is not a `Request` names:
+/// WHATWG `RequestInfo` converts it with `ToString`, so a `URL` object
+/// (what most HTTP clients pass) is its `href`. An object carrying a
+/// string `url` is read as the `Request`-like it stands for.
+fn input_url(input: &Value<'_>) -> rquickjs::Result<String> {
+  if let Some(text) = input.as_string() {
+    return text.to_string();
+  }
+  if let Some(url) = input
+    .as_object()
+    .and_then(|o| o.get::<_, Option<String>>("url").ok().flatten())
+  {
+    return Ok(url);
+  }
+  Ok(input.get::<rquickjs::convert::Coerced<String>>()?.0)
 }
