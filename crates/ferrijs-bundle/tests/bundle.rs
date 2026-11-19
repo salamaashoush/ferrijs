@@ -171,6 +171,55 @@ async fn several_entries_become_one_chunk() {
   assert_eq!(seen.result.expect("run"), serde_json::json!(["a", "b"]));
 }
 
+#[tokio::test]
+async fn each_bundled_module_reads_its_own_import_meta() {
+  let dir = tempfile::tempdir().expect("tempdir");
+  let nested = dir.path().join("nested");
+  std::fs::create_dir(&nested).expect("mkdir");
+  std::fs::write(
+    nested.join("where.ts"),
+    "export const where = { url: import.meta.url, filename: import.meta.filename, dirname: import.meta.dirname };\n",
+  )
+  .expect("write");
+  std::fs::write(
+    dir.path().join("entry.ts"),
+    r"
+    import { where } from './nested/where';
+    export default {
+      helper: where,
+      entry: import.meta.url,
+      sibling: new URL('./data.json', import.meta.url).href,
+    };
+    ",
+  )
+  .expect("write");
+  let compiled = bundler(BytecodeCache::disabled())
+    .compile(&[dir.path().join("entry.ts")], dir.path(), "entry.js")
+    .await
+    .expect("compile");
+  let rt = Runtime::builder()
+    .permissions(Permissions::none())
+    .build()
+    .await
+    .expect("runtime");
+  let run = rt.eval_module(&compiled, &[], RunOptions::default()).await;
+  let root = dunce::canonicalize(dir.path()).expect("canonical root");
+  let file_url = |path: &std::path::Path| url::Url::from_file_path(path).expect("file url").to_string();
+  let helper = root.join("nested").join("where.ts");
+  assert_eq!(
+    run.result.expect("run"),
+    serde_json::json!({
+      "helper": {
+        "url": file_url(&helper),
+        "filename": helper.to_string_lossy(),
+        "dirname": root.join("nested").to_string_lossy(),
+      },
+      "entry": file_url(&root.join("entry.ts")),
+      "sibling": file_url(&root.join("data.json")),
+    })
+  );
+}
+
 #[test]
 fn source_kind_heuristics() {
   assert!(ferrijs_bundle::is_typescript_path(std::path::Path::new("a.mts")));

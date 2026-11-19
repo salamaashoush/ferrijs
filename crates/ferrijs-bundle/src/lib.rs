@@ -7,6 +7,7 @@
 
 pub mod bundle;
 pub mod cache;
+mod import_meta;
 
 pub use bundle::{BundledSource, Bundler, BundlerOptions, is_typescript_path, source_is_es_module};
 pub use cache::{BytecodeCache, CacheEntry, abi_tag, entry_key, input_set, inputs_fingerprint, source_stamp};

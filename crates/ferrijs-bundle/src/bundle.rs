@@ -27,8 +27,8 @@ use rolldown::{
 };
 use rolldown_common::{CodeSplittingMode, ModuleType, Output, ResolveOptions, TsConfig};
 use rolldown_plugin::{
-  HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
-  Plugin, PluginContext, Pluginable, SharedLoadPluginContext,
+  HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn,
+  HookTransformAstArgs, HookTransformAstReturn, HookUsage, Plugin, PluginContext, Pluginable, SharedLoadPluginContext,
 };
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness};
 
@@ -290,8 +290,23 @@ impl Plugin for RuntimePlugin {
     }))
   }
 
+  // rolldown's `Plugin` declares these `async`; an impl that happens to
+  // need no `.await` still cannot drop the keyword without failing to
+  // satisfy the trait. `unknown_lints` rides along because the lint
+  // itself only exists from 1.98, and this crate still compiles below it.
+  #[allow(unknown_lints, clippy::unused_async_trait_impl)]
+  async fn transform_ast(&self, _ctx: &PluginContext, mut args: HookTransformAstArgs<'_>) -> HookTransformAstReturn {
+    let path = Path::new(args.id);
+    if path.is_absolute() {
+      args.ast.program.with_mut(|fields| {
+        crate::import_meta::rewrite(fields.program, fields.allocator, path);
+      });
+    }
+    Ok(args.ast)
+  }
+
   fn register_hook_usage(&self) -> HookUsage {
-    HookUsage::ResolveId | HookUsage::Load
+    HookUsage::ResolveId | HookUsage::Load | HookUsage::TransformAst
   }
 }
 
