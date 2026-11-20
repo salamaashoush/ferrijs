@@ -106,7 +106,15 @@ fn promisified<'js>(
 }
 
 fn promisify<'js>(ctx: Ctx<'js>, original: Function<'js>) -> Result<Function<'js>> {
-  // Node honours a `util.promisify.custom` implementation on the target.
+  // Node honours a `util.promisify.custom` implementation on the target
+  // (`child_process.exec` resolves to `{ stdout, stderr }` through one);
+  // `__promisify__` is the older spelling some libraries still set.
+  let symbol: Object<'js> = ctx.globals().get("Symbol")?;
+  let symbol_for: Function<'js> = symbol.get("for")?;
+  let custom_key: Value<'js> = symbol_for.call(("nodejs.util.promisify.custom",))?;
+  if let Ok(custom) = original.get::<_, Function<'js>>(custom_key) {
+    return Ok(custom);
+  }
   if let Ok(custom) = original.get::<_, Function<'js>>("__promisify__") {
     return Ok(custom);
   }
@@ -302,7 +310,10 @@ pub fn util_object<'js>(ctx: &Ctx<'js>) -> Result<Object<'js>> {
   inspect_fn.set("custom", custom)?;
   util.set("inspect", inspect_fn)?;
 
-  util.set("promisify", Func::from(promisify))?;
+  let promisify_fn = Function::new(ctx.clone(), promisify)?.with_name("promisify")?;
+  let promisify_custom: Value<'js> = symbol_for.call(("nodejs.util.promisify.custom",))?;
+  promisify_fn.set("custom", promisify_custom)?;
+  util.set("promisify", promisify_fn)?;
   util.set("callbackify", Func::from(callbackify))?;
   util.set("deprecate", Func::from(deprecate))?;
   util.set("inherits", Func::from(inherits))?;

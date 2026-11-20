@@ -54,7 +54,7 @@ shape, Hardened JavaScript's intrinsic freezing and clock taming as
 opt-ins, and workerd's position that process-level isolation is the
 host's layer.
 
-## The five kinds
+## The six kinds
 
 | kind    | grants                                          | checked by                                  |
 |---------|-------------------------------------------------|---------------------------------------------|
@@ -63,6 +63,13 @@ host's layer.
 | `net`   | hosts, optionally with a port; `*.` wildcards    | `fetch` on the first URL and every redirect hop |
 | `env`   | variable names                                  | what `process.env` is populated with        |
 | `sys`   | facts about the host: hostname, release, uptime, load, interfaces, memory, uid, gid, username, cpus, homedir, priority | each `os` member |
+| `run`   | programs, by name (found on `PATH`) or path      | every `child_process` start, on the program it executes (the shell, for `shell` and `exec`) |
+
+A child process runs outside the realm with the host process's own
+authority: nothing here follows it. Granting `run` for a program grants
+whatever that program can do, and granting a shell grants everything.
+Deno draws the same line for `--allow-run`. A name and a path match when
+they find the same file, so `run: ["bun"]` covers `/opt/homebrew/bin/bun`.
 
 Each kind is `None`, `All`, or a list. A `deny` list per kind overrides
 the grant: `read: All` with `deny.read: ["/etc"]`.

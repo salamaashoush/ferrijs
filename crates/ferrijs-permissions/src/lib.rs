@@ -9,7 +9,7 @@
 //!
 //! The model is Deno's and Node's, which are the two that survived:
 //!
-//! - [`Permissions`] is the policy: five kinds ([`Kind`]), each a
+//! - [`Permissions`] is the policy: six kinds ([`Kind`]), each a
 //!   [`Allow`] of none, everything, or a list, plus a [`Deny`] list per
 //!   kind that overrides the allow (`read: all, deny read: /etc`).
 //! - [`Container`] holds the policy for ONE realm for the realm's whole
@@ -56,6 +56,10 @@ pub enum Kind {
   /// Learning something about the host: its name, addresses, users,
   /// load, memory.
   Sys,
+  /// Starting a program as a child process. A child runs outside the
+  /// realm's sandbox with the host process's own authority, so granting
+  /// a program is granting whatever that program can do.
+  Run,
 }
 
 impl Kind {
@@ -67,6 +71,7 @@ impl Kind {
       Self::Net => "net",
       Self::Env => "env",
       Self::Sys => "sys",
+      Self::Run => "run",
     }
   }
 }
@@ -491,12 +496,18 @@ pub struct Deny {
   pub net: Vec<NetRule>,
   pub env: Vec<String>,
   pub sys: Vec<SysInfo>,
+  pub run: Vec<String>,
 }
 
 impl Deny {
   #[must_use]
   pub fn is_empty(&self) -> bool {
-    self.read.is_empty() && self.write.is_empty() && self.net.is_empty() && self.env.is_empty() && self.sys.is_empty()
+    self.read.is_empty()
+      && self.write.is_empty()
+      && self.net.is_empty()
+      && self.env.is_empty()
+      && self.sys.is_empty()
+      && self.run.is_empty()
   }
 
   fn merged(&self, other: &Self) -> Self {
@@ -515,6 +526,7 @@ impl Deny {
       net: union(&self.net, &other.net),
       env: union(&self.env, &other.env),
       sys: union(&self.sys, &other.sys),
+      run: union(&self.run, &other.run),
     }
   }
 }
@@ -532,6 +544,8 @@ pub struct Permissions {
   pub net: Allow<NetRule>,
   pub env: Allow<String>,
   pub sys: Allow<SysInfo>,
+  /// Programs a script may start, by name (looked up on `PATH`) or path.
+  pub run: Allow<String>,
   #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Deny::is_empty"))]
   pub deny: Deny,
 }
@@ -552,6 +566,7 @@ impl Permissions {
       net: Allow::All,
       env: Allow::All,
       sys: Allow::All,
+      run: Allow::All,
       deny: Deny::default(),
     }
   }
@@ -615,6 +630,17 @@ impl Permissions {
     self
   }
 
+  /// Grant these programs, by name or path.
+  #[must_use]
+  pub fn allow_run<I, S>(mut self, programs: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+  {
+    self.run = Allow::Only(programs.into_iter().map(Into::into).collect());
+    self
+  }
+
   #[must_use]
   pub fn allow_all_read(mut self) -> Self {
     self.read = Allow::All;
@@ -642,6 +668,12 @@ impl Permissions {
   #[must_use]
   pub fn allow_all_sys(mut self) -> Self {
     self.sys = Allow::All;
+    self
+  }
+
+  #[must_use]
+  pub fn allow_all_run(mut self) -> Self {
+    self.run = Allow::All;
     self
   }
 
@@ -698,6 +730,16 @@ impl Permissions {
     self
   }
 
+  #[must_use]
+  pub fn deny_run<I, S>(mut self, programs: I) -> Self
+  where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+  {
+    self.deny.run.extend(programs.into_iter().map(Into::into));
+    self
+  }
+
   /// The grant for one kind, as an untyped view for reporting.
   #[must_use]
   pub fn describe(&self, kind: Kind) -> String {
@@ -714,6 +756,7 @@ impl Permissions {
       Kind::Net => render(&self.net),
       Kind::Env => render(&self.env),
       Kind::Sys => render(&self.sys),
+      Kind::Run => render(&self.run),
     }
   }
 
@@ -728,6 +771,7 @@ impl Permissions {
       net: self.net.intersect_with(&other.net, NetRule::subsumes),
       env: self.env.intersect_with(&other.env, |a, b| a == b),
       sys: self.sys.intersect_with(&other.sys, |a, b| a == b),
+      run: self.run.intersect_with(&other.run, |a, b| same_program(a, b)),
       deny: self.deny.merged(&other.deny),
     }
   }
@@ -808,6 +852,26 @@ impl Permissions {
     }
   }
 
+  /// `program` is what the script asked to start: a name looked up on
+  /// `PATH`, or a path.
+  ///
+  /// # Errors
+  ///
+  /// [`Denied`] naming the program.
+  pub fn check_run(&self, program: &str) -> Result<(), Denied> {
+    let granted = !self.deny.run.iter().any(|entry| same_program(entry, program))
+      && match &self.run {
+        Allow::None => false,
+        Allow::All => true,
+        Allow::Only(entries) => entries.iter().any(|entry| same_program(entry, program)),
+      };
+    if granted {
+      Ok(())
+    } else {
+      Err(Denied::new(Kind::Run, program))
+    }
+  }
+
   /// The process environment reduced to this policy's `env` grant, in
   /// name order. What a host hands to `process.env`.
   #[must_use]
@@ -825,6 +889,48 @@ impl Permissions {
     out.dedup_by(|a, b| a.0 == b.0);
     out
   }
+}
+
+/// Whether a `run` entry names the program a script asked for: the same
+/// text, or the same file once each is found (a name on `PATH`, a path
+/// with its links followed), as Deno matches `--allow-run`. A grant of
+/// `bun` therefore covers `/opt/homebrew/bin/bun`, and a grant of a
+/// path covers the name that `PATH` resolves to it.
+fn same_program(entry: &str, program: &str) -> bool {
+  if entry == program {
+    return true;
+  }
+  match (locate_program(entry), locate_program(program)) {
+    (Some(a), Some(b)) => a == b,
+    _ => false,
+  }
+}
+
+/// Where `program` resolves: a path as itself, a bare name through the
+/// directories on `PATH`, either with its links followed.
+#[must_use]
+pub fn locate_program(program: &str) -> Option<PathBuf> {
+  let candidate = Path::new(program);
+  if candidate.components().count() > 1 || candidate.is_absolute() {
+    return std::fs::canonicalize(candidate).ok();
+  }
+  let path = std::env::var_os("PATH")?;
+  let extensions: Vec<String> = if cfg!(windows) {
+    std::env::var("PATHEXT")
+      .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".to_string())
+      .split(';')
+      .map(str::to_ascii_lowercase)
+      .chain(std::iter::once(String::new()))
+      .collect()
+  } else {
+    vec![String::new()]
+  };
+  std::env::split_paths(&path).find_map(|dir| {
+    extensions.iter().find_map(|extension| {
+      let file = dir.join(format!("{program}{extension}"));
+      file.is_file().then(|| std::fs::canonicalize(&file).ok()).flatten()
+    })
+  })
 }
 
 fn check_path(kind: Kind, allow: &Allow<PathRule>, deny: &[PathRule], path: &Path) -> Result<(), Denied> {
@@ -882,6 +988,7 @@ impl fmt::Display for Denied {
       Kind::Net => "network access to",
       Kind::Env => "access to environment variable",
       Kind::Sys => "access to host information",
+      Kind::Run => "permission to run",
     };
     write!(
       f,
@@ -997,7 +1104,7 @@ impl Container {
 
   /// Carve `resource` out of `kind` for good. `resource` is a path for
   /// `read` / `write`, a host rule for `net`, a name for `env`, a
-  /// [`SysInfo`] name for `sys`.
+  /// [`SysInfo`] name for `sys`, a program name or path for `run`.
   ///
   /// # Errors
   ///
@@ -1011,6 +1118,7 @@ impl Container {
       Kind::Net => next.deny.net.push(NetRule::parse(resource)?),
       Kind::Env => next.deny.env.push(resource.to_string()),
       Kind::Sys => next.deny.sys.push(sys_info_from_str(resource)?),
+      Kind::Run => next.deny.run.push(resource.to_string()),
     }
     *guard = Arc::new(next);
     Ok(())
@@ -1078,6 +1186,14 @@ impl Container {
     self.decide(Kind::Sys, item.as_str(), result)
   }
 
+  /// # Errors
+  ///
+  /// [`Denied`] when neither the policy nor the hook grants it.
+  pub fn check_run(&self, program: &str) -> Result<(), Denied> {
+    let result = self.permissions().check_run(program);
+    self.decide(Kind::Run, program, result)
+  }
+
   /// Whether `kind` covers `resource` right now, without consulting the
   /// hook or the audit: what a `has()`-style query answers. `None`
   /// asks about the kind as a whole (granted in full).
@@ -1093,6 +1209,7 @@ impl Container {
       (Kind::Net, None) => policy.net.is_all() && policy.deny.net.is_empty(),
       (Kind::Env, None) => policy.env.is_all() && policy.deny.env.is_empty(),
       (Kind::Sys, None) => policy.sys.is_all() && policy.deny.sys.is_empty(),
+      (Kind::Run, None) => policy.run.is_all() && policy.deny.run.is_empty(),
       (Kind::Read, Some(r)) => policy.check_read(Path::new(r)).is_ok(),
       (Kind::Write, Some(r)) => policy.check_write(Path::new(r)).is_ok(),
       (Kind::Net, Some(r)) => {
@@ -1101,6 +1218,7 @@ impl Container {
       },
       (Kind::Env, Some(r)) => policy.check_env(r).is_ok(),
       (Kind::Sys, Some(r)) => policy.check_sys(sys_info_from_str(r)?).is_ok(),
+      (Kind::Run, Some(r)) => policy.check_run(r).is_ok(),
     })
   }
 }
@@ -1135,8 +1253,9 @@ impl std::str::FromStr for Kind {
       "net" => Ok(Self::Net),
       "env" => Ok(Self::Env),
       "sys" => Ok(Self::Sys),
+      "run" => Ok(Self::Run),
       other => Err(format!(
-        "`{other}` is not a permission kind (read, write, net, env, sys)"
+        "`{other}` is not a permission kind (read, write, net, env, sys, run)"
       )),
     }
   }
@@ -1448,5 +1567,35 @@ mod tests {
     assert_eq!(round_trip.deny.read.len(), 1);
     let plain: Permissions = serde_json::from_str(r#"{"read": true}"#).unwrap();
     assert!(serde_json::to_value(&plain).unwrap().get("deny").is_none());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_run_grant_names_a_program_by_name_or_by_path() {
+    let by_name = Permissions::none().allow_run(["sh"]);
+    let path = locate_program("sh").expect("sh on PATH");
+    assert!(by_name.check_run("sh").is_ok());
+    assert!(by_name.check_run(&path.to_string_lossy()).is_ok());
+    let by_path = Permissions::none().allow_run([path.to_string_lossy().into_owned()]);
+    assert!(by_path.check_run("sh").is_ok());
+    let denied = by_name.check_run("cat").unwrap_err();
+    assert_eq!(denied.kind, Kind::Run);
+    assert_eq!(denied.resource, "cat");
+    assert!(Permissions::none().check_run("sh").is_err());
+  }
+
+  #[test]
+  fn a_run_denial_wins_and_drop_narrows_for_good() {
+    let policy = Permissions::none().allow_all_run().deny_run(["rm"]);
+    assert!(policy.check_run("rm").is_err());
+    assert!(policy.check_run("ls").is_ok());
+    let container = Container::new(Permissions::none().allow_run(["ls", "git"]));
+    assert!(container.has(Kind::Run, Some("git")).unwrap());
+    assert!(!container.has(Kind::Run, None).unwrap());
+    container.deny(Kind::Run, "git").unwrap();
+    assert!(container.check_run("git").is_err());
+    assert!(container.check_run("ls").is_ok());
+    assert_eq!("run".parse::<Kind>(), Ok(Kind::Run));
+    assert_eq!(Kind::Run.to_string(), "run");
   }
 }

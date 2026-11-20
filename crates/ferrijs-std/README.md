@@ -707,3 +707,23 @@ the extension that needs it.
     `cpus()` is empty, memory reads 0, `networkInterfaces()` is empty and
     `loadavg()` and `uptime()` are 0, as 0.39 answered; `hostname()` still
     throws.
+
+50. **`fs/guard.rs` — a path may be a `Buffer` or a `file:` `URL`.**
+    Upstream's functions take a `String`, so
+    `readFileSync(new URL('./data.json', import.meta.url))` failed to
+    convert its argument. The guard's wrappers, which every registration
+    goes through, now take Node's `PathLike` and hand upstream the string:
+    a byte view as UTF-8, a `file:` URL through `fileURLToPath`, any other
+    URL refused with `ERR_INVALID_URL_SCHEME`. The vendored functions are
+    unchanged.
+
+51. **`node/child_process.rs` and `child_process.js` — `node:child_process`.**
+    Upstream has none. Ours: `spawn`, `exec`, `execFile` (with their
+    `util.promisify` forms), `spawnSync`, `execSync` and `execFileSync`,
+    each start checked against the realm's `run` grant for the program it
+    executes. The files are ours; a re-sync needs only the `mod` line and
+    the module's entry in `modules.rs` re-added.
+
+52. **`node/util.rs` — `util.promisify.custom`.** `promisify` honours the
+    `nodejs.util.promisify.custom` symbol, which `util.promisify.custom`
+    now exposes, before the older `__promisify__` property.

@@ -7,6 +7,7 @@ pub mod assert;
 pub mod buffer;
 mod bundled;
 pub mod bytes;
+pub mod child_process;
 pub mod crypto;
 pub mod deep_equal;
 pub mod diagnostics_channel;

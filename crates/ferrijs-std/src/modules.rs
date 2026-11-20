@@ -427,6 +427,11 @@ pub fn modules() -> Vec<NodeModule> {
       namespace: |ctx| crate::fs::fs_promises_object(ctx),
     },
     NodeModule {
+      specifiers: &["child_process", "node:child_process"],
+      declare: declare_fn::<crate::node::child_process::ChildProcessModule>(),
+      namespace: crate::node::child_process::namespace,
+    },
+    NodeModule {
       specifiers: &["os", "node:os"],
       declare: declare_fn::<OsModule>(),
       namespace: os_namespace,

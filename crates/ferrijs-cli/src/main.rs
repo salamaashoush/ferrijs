@@ -84,6 +84,10 @@ struct Grants {
   /// Facts about the host the program may learn (`hostname`, `cpus`, ...).
   #[arg(long, num_args = 0.., value_delimiter = ',')]
   allow_sys: Option<Vec<String>>,
+  /// Programs the program may start as child processes, by name or path.
+  /// A child runs outside the sandbox with this process's authority.
+  #[arg(long, num_args = 0.., value_delimiter = ',')]
+  allow_run: Option<Vec<String>>,
   /// Deny a path for reading even when granted (repeatable).
   #[arg(long, value_delimiter = ',')]
   deny_read: Vec<PathBuf>,
@@ -152,6 +156,11 @@ impl Grants {
           .collect::<Result<Vec<_>, _>>()?;
         p = p.allow_sys(items);
       },
+      None => {},
+    }
+    match &self.allow_run {
+      Some(list) if list.is_empty() => p = p.allow_all_run(),
+      Some(list) => p = p.allow_run(list.clone()),
       None => {},
     }
     p = p

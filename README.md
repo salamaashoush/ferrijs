@@ -34,11 +34,20 @@ println!("{:?} in {}ms", run.result, run.duration_ms);
   compression streams, the timers, `queueMicrotask`, `console`.
 - **The Node modules**, under the names Node serves them: `node:fs`
   (and `fs/promises`), `path`, `buffer`, `crypto`, `events`, `util`,
-  `assert`, `url`, `os`, `zlib`, `stream` (and `stream/promises`),
+  `assert`, `url`, `os`, `zlib`, `child_process` (under the `run`
+  grant), `stream` (and `stream/promises`),
   `stream/web`, `string_decoder`, `timers`, `perf_hooks`, `tty`,
   `diagnostics_channel`, `process`; `require()` for the CommonJS
   spelling; `process` with `env`, `cwd()`, `hrtime`, `nextTick`,
   `permission.has()` and `permission.drop()`.
+- **`Intl`**, with the `intl` feature: `Collator`, `NumberFormat`,
+  `DateTimeFormat` (IANA time zones, every CLDR calendar ICU4X has),
+  `PluralRules`, `RelativeTimeFormat`, `ListFormat`, `DisplayNames`,
+  `Segmenter`, `Locale`, `supportedValuesOf`, and `localeCompare`,
+  `toLocaleString` and `toLocaleUpperCase` over them. It runs on ICU4X
+  with CLDR's data compiled in, installs on first read, and keeps the
+  formatters the built-in methods make. `crates/ferrijs-intl/README.md`
+  lists where it differs from V8.
 - **ES modules** from disk under a policy (a root, optionally a jail,
   optionally none at all), and native modules a host registers.
 - **A run bracket**: a wall-clock budget enforced by the interrupt
@@ -52,8 +61,8 @@ vendored and kept byte-close so it re-syncs; see
 
 ## The sandbox
 
-A realm starts with nothing. Five grants (`read`, `write`, `net`,
-`env`, `sys`), each none, all or a list, with deny lists on top, held
+A realm starts with nothing. Six grants (`read`, `write`, `net`,
+`env`, `sys`, `run`), each none, all or a list, with deny lists on top, held
 in one container per realm that only ever narrows. A module the policy
 withholds is absent, not present and refusing. `eval` can be switched
 off, the intrinsics frozen, the clocks coarsened. The model and the
@@ -69,6 +78,7 @@ Java's stack-inspection model was removed) are in
 | `ferrijs-std`         | the standard library and the permission checks it makes           |
 | `ferrijs-permissions` | the policy: grants, deny lists, the container, path and host rules |
 | `ferrijs-fetch`       | the WHATWG fetch model and reqwest send loop with the SSRF guard   |
+| `ferrijs-intl`        | ECMA-402 `Intl` on ICU4X, behind the runtime's `intl` feature      |
 | `ferrijs-bundle`      | rolldown to bytecode, cached on disk under an ABI tag              |
 | `ferrijs-cli`         | `ferrijs run file.ts --allow-net api.example.com`                  |
 

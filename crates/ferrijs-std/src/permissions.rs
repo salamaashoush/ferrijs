@@ -123,6 +123,17 @@ pub fn check_sys(ctx: &Ctx<'_>, item: SysInfo) -> rquickjs::Result<()> {
   }
 }
 
+/// # Errors
+///
+/// A `PermissionDeniedError` when the realm's `run` grant does not
+/// cover `program`.
+pub fn check_run(ctx: &Ctx<'_>, program: &str) -> rquickjs::Result<()> {
+  match container(ctx) {
+    Some(c) => checked(ctx, c.check_run(program)),
+    None => Ok(()),
+  }
+}
+
 /// Whether `kind` covers `resource` right now, for a `has()`-style
 /// query. Unrestricted when no container is installed.
 ///
@@ -165,6 +176,7 @@ pub fn drop(ctx: &Ctx<'_>, kind: &str, resource: Option<&str>) -> rquickjs::Resu
         ferrijs_permissions::Kind::Net => remaining.net = ferrijs_permissions::Allow::None,
         ferrijs_permissions::Kind::Env => remaining.env = ferrijs_permissions::Allow::None,
         ferrijs_permissions::Kind::Sys => remaining.sys = ferrijs_permissions::Allow::None,
+        ferrijs_permissions::Kind::Run => remaining.run = ferrijs_permissions::Allow::None,
       }
       c.revoke(&remaining);
       Ok(())
