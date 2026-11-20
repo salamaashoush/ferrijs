@@ -50,8 +50,6 @@ pub enum ResponseType {
   Cors,
   /// An opaque cross-origin `no-cors` response.
   Opaque,
-  /// An opaque `redirect: manual` 3xx.
-  OpaqueRedirect,
   /// A network-error response (`Response.error()`).
   Error,
   /// A constructed response with no filtering applied.
@@ -65,7 +63,6 @@ impl ResponseType {
       Self::Basic => "basic",
       Self::Cors => "cors",
       Self::Opaque => "opaque",
-      Self::OpaqueRedirect => "opaqueredirect",
       Self::Error => "error",
       Self::Default => "default",
     }

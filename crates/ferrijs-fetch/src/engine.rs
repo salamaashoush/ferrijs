@@ -702,11 +702,7 @@ fn into_response(
     redirected: hops_followed > 0,
     unfollowed_redirect,
     server_addr,
-    type_: if unfollowed_redirect {
-      ResponseType::OpaqueRedirect
-    } else {
-      ResponseType::Basic
-    },
+    type_: ResponseType::Basic,
     timing,
     peer_certificate,
   }

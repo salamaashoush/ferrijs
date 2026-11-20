@@ -532,23 +532,6 @@ impl<'js> FetchResponseJs<'js> {
     }
   }
 
-  /// A WHATWG opaque-redirect filtered response (`redirect: manual` on a
-  /// 3xx): type "opaqueredirect", status 0, empty headers, null body.
-  fn opaque_redirect() -> Self {
-    Self {
-      status: 0,
-      status_text: String::new(),
-      url: String::new(),
-      headers: CoreHeaders::new(),
-      body: Vec::new(),
-      redirected: false,
-      type_: "opaqueredirect",
-      body_used: false,
-      net: None,
-      body_stream: None,
-    }
-  }
-
   /// The `Response.body` stream, created on first access.
   ///
   /// A streamed `fetch` result shares the live response with the stream
@@ -1520,8 +1503,11 @@ fn do_fetch<'js>(
       },
     };
     // `init.redirect` (or the Request's) maps onto the WHATWG redirect
-    // mode: "follow" (default) follows up to the engine cap; "manual"
-    // returns an opaque-redirect Response for a 3xx; "error" rejects.
+    // mode: "follow" (default) follows up to the engine cap; "error"
+    // rejects; "manual" returns the 3xx itself, status, `Location` and
+    // body readable, as Node, Deno and Bun do. A browser filters it to an
+    // opaque redirect because a page must not read another origin's
+    // answer; a server-side script has no such origin to protect.
     let redirect = init
       .as_ref()
       .and_then(|o| o.get::<_, String>("redirect").ok())
@@ -1584,12 +1570,6 @@ fn do_fetch<'js>(
         },
         None => fut.await.map_err(fail)?,
       };
-      // `redirect: manual` on a 3xx yields an opaque-redirect filtered
-      // response: type "opaqueredirect", status 0, empty headers, null
-      // body, url "" (WHATWG). The unread 3xx is dropped here.
-      if resp.unfollowed_redirect {
-        return Ok(FetchResponseJs::opaque_redirect());
-      }
       let ferrijs_fetch::Response {
         status,
         status_text,

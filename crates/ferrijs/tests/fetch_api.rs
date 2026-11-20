@@ -902,20 +902,24 @@ async fn fetch_follows_redirect_marks_type_basic_and_redirected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_redirect_manual_yields_opaqueredirect() {
+async fn fetch_redirect_manual_returns_the_redirect_itself() {
   let (base, _h) = spawn_router();
   let o = run(&format!(
     r#"const r = await fetch("{base}/redirect", {{ redirect: "manual" }});
-       return {{ status: r.status, type: r.type, url: r.url, ok: r.ok }};"#
+       return {{ status: r.status, type: r.type, url: r.url, ok: r.ok, redirected: r.redirected,
+                 location: r.headers.get("location"), body: await r.text() }};"#
   ))
   .await;
   let v = val(&o);
-  // WHATWG opaque-redirect filtered response: type opaqueredirect, status
-  // 0, empty url, not ok.
-  assert_eq!(v["type"], "opaqueredirect");
-  assert_eq!(v["status"], 0);
-  assert_eq!(v["url"], "");
+  // Node, Deno and Bun hand back the 3xx unfiltered, so a script can read
+  // where it points.
+  assert_eq!(v["status"], 302);
+  assert_eq!(v["type"], "basic");
+  assert_eq!(v["url"], format!("{base}/redirect"));
   assert_eq!(v["ok"], false);
+  assert_eq!(v["redirected"], false);
+  assert_eq!(v["location"], "/landed");
+  assert_eq!(v["body"], "");
 }
 
 #[tokio::test(flavor = "multi_thread")]
