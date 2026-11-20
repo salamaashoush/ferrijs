@@ -117,6 +117,11 @@ pub struct Config {
   /// default is the standalone [`crate::fetch::Client`].
   #[cfg(feature = "fetch")]
   pub fetch: Option<Arc<dyn crate::fetch::FetchBackend>>,
+  /// What the realm's `Intl` starts from: its default locale and time
+  /// zone. `None` installs no `Intl`, and leaves the engine's own
+  /// `localeCompare` and `toLocaleString`, which know no locale.
+  #[cfg(feature = "intl")]
+  pub intl: Option<ferrijs_intl::IntlOptions>,
   pub extensions: Vec<Arc<dyn Extension>>,
   /// Hears an uncaught exception that no run was there to fail. See
   /// [`crate::uncaught`].
@@ -175,6 +180,8 @@ impl Default for Builder {
         vm_capacity: crate::vm::DEFAULT_VM_CAPACITY,
         #[cfg(feature = "fetch")]
         fetch: Some(Arc::new(crate::fetch::Client::new())),
+        #[cfg(feature = "intl")]
+        intl: Some(ferrijs_intl::IntlOptions::default()),
         extensions: Vec::new(),
         on_uncaught: None,
       },
@@ -295,6 +302,24 @@ impl Builder {
   #[must_use]
   pub fn without_fetch(mut self) -> Self {
     self.config.fetch = None;
+    self
+  }
+
+  /// The default locale and time zone the realm's `Intl` resolves to,
+  /// in place of the host's own.
+  #[cfg(feature = "intl")]
+  #[must_use]
+  pub fn intl(mut self, options: ferrijs_intl::IntlOptions) -> Self {
+    self.config.intl = Some(options);
+    self
+  }
+
+  /// No `Intl` global, and the engine's own locale-blind
+  /// `localeCompare` and `toLocaleString`.
+  #[cfg(feature = "intl")]
+  #[must_use]
+  pub fn without_intl(mut self) -> Self {
+    self.config.intl = None;
     self
   }
 
@@ -641,6 +666,8 @@ impl Runtime {
     let script_cache = config.script_cache;
     #[cfg(feature = "fetch")]
     let fetch_backend = config.fetch.clone();
+    #[cfg(feature = "intl")]
+    let intl = config.intl.clone();
     let realm = config.realm.clone();
     let extensions = config.extensions.clone();
     let uncaught = Arc::new(crate::uncaught::Watch::default());
@@ -678,6 +705,10 @@ impl Runtime {
       #[cfg(feature = "fetch")]
       if let Some(backend) = fetch_backend {
         crate::fetch::install(&ctx, backend).map_err(|e| fail("fetch", e))?;
+      }
+      #[cfg(feature = "intl")]
+      if let Some(options) = &intl {
+        ferrijs_intl::install(&ctx, options).map_err(|e| fail("Intl", e))?;
       }
       // A console from the start, so an extension's top-level
       // `console.log` has somewhere to go; each run retargets it at its

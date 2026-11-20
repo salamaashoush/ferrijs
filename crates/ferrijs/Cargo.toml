@@ -18,6 +18,10 @@ default = ["fetch"]
 # The WHATWG `fetch` global with `Headers` / `Request` / `Response` over
 # the `ferrijs-fetch` engine, under the realm's `net` grant.
 fetch = ["dep:ferrijs-fetch", "dep:bytes"]
+# ECMA-402 `Intl` on ICU4X, with CLDR's data compiled in, and the
+# locale-sensitive `localeCompare` / `toLocaleString` methods over it.
+# Adds the data to the binary, so it is opt-in.
+intl = ["dep:ferrijs-intl"]
 # `schemars::JsonSchema` on the result and error types, for a host that
 # publishes them as a wire contract.
 schema = ["dep:schemars"]
@@ -33,6 +37,7 @@ js-dump-leaks = ["rquickjs/dump-leaks"]
 ferrijs-std = { workspace = true }
 ferrijs-permissions = { workspace = true }
 ferrijs-fetch = { workspace = true, optional = true }
+ferrijs-intl = { workspace = true, optional = true }
 rquickjs = { workspace = true }
 libmimalloc-sys = { workspace = true }
 # Direct serde <-> rquickjs::Value (no serde_json::Value middle-hop).

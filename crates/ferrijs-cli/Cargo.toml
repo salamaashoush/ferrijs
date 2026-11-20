@@ -17,6 +17,11 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["intl"]
+# `Intl` and the locale-sensitive built-ins, as Node has them.
+intl = ["ferrijs/intl"]
+
 [dependencies]
 ferrijs = { path = "../ferrijs", version = "0.9.2" }
 ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.9.2" }

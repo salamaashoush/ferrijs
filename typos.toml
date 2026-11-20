@@ -21,3 +21,10 @@ styl = "styl"
 # vendored tree; our callers have to name it as it is spelled there.
 resolveable = "resolveable"
 Resolveable = "Resolveable"
+# `writeable` is ICU4X's crate of that name (`writeable::Part`), which
+# ferrijs-intl imports as it is spelled.
+writeable = "writeable"
+# Codes ferrijs-intl lists as the standards spell them: `JOD` is ISO
+# 4217's Jordanian dinar, `beng` CLDR's Bengali digits.
+JOD = "JOD"
+beng = "beng"

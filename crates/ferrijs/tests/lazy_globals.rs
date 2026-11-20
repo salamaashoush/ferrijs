@@ -30,11 +30,15 @@ async fn eval(rt: &Runtime, source: &str, args: &[serde_json::Value]) -> serde_j
   }
 }
 
+/// Every name the realm installs on first read: the standard library's
+/// groups, and `Intl` where the realm has one.
 fn lazy_names() -> Vec<&'static str> {
-  ferrijs::std::LAZY_GROUPS
+  let names = ferrijs::std::LAZY_GROUPS
     .iter()
-    .flat_map(|group| group.names.iter().copied())
-    .collect()
+    .flat_map(|group| group.names.iter().copied());
+  #[cfg(feature = "intl")]
+  let names = names.chain(["Intl"]);
+  names.collect()
 }
 
 /// Every own global with its type, attributes and, for a constructor, the
