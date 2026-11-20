@@ -1471,9 +1471,13 @@ fn do_fetch<'js>(
       .as_ref()
       .and_then(|o| o.get::<_, String>("method").ok())
       .or_else(|| req.as_ref().map(|r| r.borrow().method.clone()));
+    // A key `init` lacks reads as `undefined`, which is not an
+    // override: `fetch(request, { signal })` keeps the request's own
+    // headers and body, as a spread of an `init` without them does.
     let mut header_list: CoreHeaders = init
       .as_ref()
       .and_then(|o| o.get::<_, Value<'_>>("headers").ok())
+      .filter(|v| !v.is_undefined())
       .map(|v| header_list_from(&v))
       .or_else(|| req.as_ref().map(|r| r.borrow().headers.clone()))
       .unwrap_or_default();
@@ -1481,7 +1485,11 @@ fn do_fetch<'js>(
     // ([`super::body_init`]) that the `Request` / `Response`
     // constructors use, so every `BodyInit` type reaches the wire the
     // same way from every entry point.
-    let extracted = match init.as_ref().and_then(|o| o.get::<_, Value<'_>>("body").ok()) {
+    let extracted = match init
+      .as_ref()
+      .and_then(|o| o.get::<_, Value<'_>>("body").ok())
+      .filter(|v| !v.is_undefined())
+    {
       Some(v) => extract_body(&ctx, &v)?,
       None => None,
     };

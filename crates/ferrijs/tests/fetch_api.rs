@@ -7,7 +7,7 @@ use std::net::TcpListener;
 
 use ferrijs::{Permissions, Run, RunOptions, Runtime};
 
-/// Tiny HTTP/1.1 server: replies `{"method","path","body"}`. Lives for
+/// Tiny HTTP/1.1 server: replies `{"method","path","body","authorization"}`. Lives for
 /// the test, handles a handful of sequential requests, then the socket
 /// closes when the listener drops.
 fn spawn_echo() -> (String, std::thread::JoinHandle<()>) {
@@ -25,7 +25,17 @@ fn spawn_echo() -> (String, std::thread::JoinHandle<()>) {
       let method = it.next().unwrap_or("GET").to_string();
       let path = it.next().unwrap_or("/").to_string();
       let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-      let payload = serde_json::json!({ "method": method, "path": path, "body": body }).to_string();
+      let authorization = req
+        .lines()
+        .find_map(|line| {
+          let (name, value) = line.split_once(':')?;
+          name
+            .eq_ignore_ascii_case("authorization")
+            .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default();
+      let payload =
+        serde_json::json!({ "method": method, "path": path, "body": body, "authorization": authorization }).to_string();
       let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Test: hello\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         payload.len(),
@@ -389,6 +399,25 @@ async fn fetch_and_request_take_a_url_object_as_its_href() {
   assert_eq!(
     val(&o),
     &serde_json::json!({ "direct": "/by-url?q=1", "request": format!("{url}/as-request"), "sent": "/as-request" })
+  );
+}
+
+/// An `init` that names no headers or body leaves the `Request`'s own:
+/// a client that spreads its `init` to add a `signal` must not drop
+/// the request's `authorization` or its body.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_init_without_headers_or_body_keeps_the_requests_own() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const request = new Request('{url}/rpc', {{ method: 'POST', headers: {{ authorization: 'Bearer t0k' }}, body: 'payload' }}); \
+     const init = {{ ...{{}}, signal: new AbortController().signal }}; \
+     const sent = await (await fetch(request, init)).json(); \
+     return {{ method: sent.method, authorization: sent.authorization, body: sent.body }};"
+  ))
+  .await;
+  assert_eq!(
+    val(&o),
+    &serde_json::json!({ "method": "POST", "authorization": "Bearer t0k", "body": "payload" })
   );
 }
 
