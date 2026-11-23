@@ -89,6 +89,10 @@ struct Spec {
   env: Option<Vec<(String, String)>>,
   stdio: [String; 3],
   argv0: Option<String>,
+  /// Node's `windowsVerbatimArguments`: the arguments go onto the command
+  /// line as written, which `cmd.exe` needs to parse a shell command.
+  #[cfg(windows)]
+  windows_verbatim: bool,
 }
 
 impl Spec {
@@ -114,11 +118,22 @@ impl Spec {
       env,
       stdio: [stdio.get(0)?, stdio.get(1)?, stdio.get(2)?],
       argv0: options.get("argv0")?,
+      #[cfg(windows)]
+      windows_verbatim: options.get::<_, Option<bool>>("windowsVerbatimArguments")?.unwrap_or(false),
     })
   }
 
   fn command(&self) -> Command {
     let mut command = Command::new(&self.file);
+    #[cfg(windows)]
+    if self.windows_verbatim {
+      for arg in &self.args {
+        std::os::windows::process::CommandExt::raw_arg(&mut command, arg);
+      }
+    } else {
+      command.args(&self.args);
+    }
+    #[cfg(not(windows))]
     command.args(&self.args);
     #[cfg(unix)]
     if let Some(argv0) = &self.argv0 {

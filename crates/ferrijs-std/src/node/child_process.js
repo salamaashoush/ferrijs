@@ -59,11 +59,19 @@ export default function childProcess(native, { events, stream, process, Buffer }
       throw invalidArg("args", args);
     }
     options = options == null ? {} : { ...options };
+    let windowsVerbatimArguments = Boolean(options.windowsVerbatimArguments);
     if (options.shell) {
       const command = [file, ...args].join(" ");
       if (process.platform === "win32") {
         file = typeof options.shell === "string" ? options.shell : process.env.comspec || "cmd.exe";
-        args = ["/d", "/s", "/c", `"${command}"`];
+        // cmd.exe parses its own command line, so the line goes to it as
+        // written, quotes and all, rather than quoted again per argument.
+        if (/^(?:.*\\)?cmd(?:\.exe)?$/i.test(file)) {
+          args = ["/d", "/s", "/c", `"${command}"`];
+          windowsVerbatimArguments = true;
+        } else {
+          args = ["-c", command];
+        }
       } else {
         file = typeof options.shell === "string" ? options.shell : "/bin/sh";
         args = ["-c", command];
@@ -85,6 +93,7 @@ export default function childProcess(native, { events, stream, process, Buffer }
         env: pairs,
         stdio: stdioModes(options.stdio, stdioFallback),
         argv0: options.argv0 === undefined ? undefined : String(options.argv0),
+        windowsVerbatimArguments,
         timeout: options.timeout,
         killSignal: options.killSignal,
         maxBuffer: options.maxBuffer,
