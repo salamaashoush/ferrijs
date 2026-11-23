@@ -23,8 +23,8 @@ default = ["intl"]
 intl = ["ferrijs/intl"]
 
 [dependencies]
-ferrijs = { path = "../ferrijs", version = "0.10.0" }
-ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.10.0" }
+ferrijs = { path = "../ferrijs", version = "0.10.1" }
+ferrijs-bundle = { path = "../ferrijs-bundle", version = "0.10.1" }
 ferrijs-permissions = { workspace = true }
 clap = { version = "4", features = ["derive", "wrap_help"] }
 tokio = { workspace = true }
